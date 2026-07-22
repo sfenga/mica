@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: 建立 mica 仓库与 capability=mica-core 的主 spec;以 claw0 渐进教学范式实现一个最小可用的 multiCa —— issue 板 + 多态 assignee + 本地 daemon 认领执行 + 真实 CLI(`claude`)runner + JSONL 持久化 + WebSocket 实时 + FastAPI 看板 + markdown 技能 + cron autopilot + 多 CLI PATH 探测 + 多 workspace 隔离;首次建立,不修改既有 capability。
