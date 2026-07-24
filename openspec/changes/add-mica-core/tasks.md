@@ -41,11 +41,11 @@
 - [x] 4.6 `s04_persistence.md`;`tests/test_persistence.py` + `tests/test_orphan_recovery.py`
 
 ## 5. s05 — 评论建新 task + `--resume` 上一 task.session_id
-- [ ] 5.1 `IssueStore.comment(issue_id, text)`:追加评论记录;**不**改 issue 状态;为 issue assignee 入队新 `queued` task(`trigger_comment_id` 设)
-- [ ] 5.2 daemon 认领 task 时查同 (issue,agent) 上一 task.session_id → `prior_session_id`;`ClaudeCliRunner.run(resume_session_id=...)` 加 `--resume`;无上一 task 则全新
-- [ ] 5.3 resume 失效兜底:claude 吐回新 session_id ≠ 传入 → 覆盖本 task.session_id,不沿用失效 id
-- [ ] 5.4 手动重跑:`rerun_task(issue_id)` 建新 task(`rerun_of_task_id` 指向源 task),不在原 task 上续
-- [ ] 5.5 `s05_comment_resume.md`;`tests/test_comment_resume.py`(评论入队新 task+issue 不变、--resume 上一 task、resume 失效降级、不传 no-session-persistence)
+- [x] 5.1 `IssueStore.comment(issue_id, text)`:追加评论记录;**不**改 issue 状态;为 issue assignee 入队新 `queued` task(`trigger_comment_id` 设)
+- [x] 5.2 daemon 认领 task 时查同 (issue,agent) 上一 task.session_id → `prior_session_id`;`ClaudeCliRunner.run(resume_session_id=...)` 加 `--resume`;无上一 task 则全新
+- [x] 5.3 resume 失效兜底:claude 吐回新 session_id ≠ 传入 → 覆盖本 task.session_id,不沿用失效 id
+- [x] 5.4 手动重跑:`rerun_task(issue_id)` 建新 task(`rerun_of_task_id` 指向源 task),不在原 task 上续
+- [x] 5.5 `s05_comment_resume.md`;`tests/test_comment_resume.py`(评论入队新 task+issue 不变、--resume 上一 task、resume 失效降级、不传 no-session-persistence)
 
 ## 6. s06 — WebSocket 实时
 - [ ] 6.1 `RealtimeHub`:task/issue→订阅者集合;`publish(id, event)` 推给所有订阅者
