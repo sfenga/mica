@@ -55,11 +55,11 @@
 - [x] 6.5 `s06_realtime.md`
 
 ## 7. s07 — FastAPI 单页看板
-- [ ] 7.1 `GET /`(单页 HTML,内联 JS,无构建);`GET /api/issues` 列 issue
-- [ ] 7.2 `POST /api/issues` 创建+入队 task;`PATCH /api/issues/{id}/status` 状态机校验转移(复用 s01);`POST /api/issues/{id}/comments` 评论入队 follow-up task;`WS /ws/issues/{id}` 复用 RealtimeHub
-- [ ] 7.3 页面:issue 行表 + 创建表单 + 行内状态转移 + 评论框 + 选中行实时进度;`uvicorn` 起 `MULTICA_WEB_PORT`
-- [ ] 7.4 `tests/test_web_panel.py`(创建/状态转移/评论各合法与非法路径)
-- [ ] 7.5 `s07_web_panel.md`
+- [x] 7.1 `GET /`(单页 HTML,内联 JS,无构建);`GET /api/issues` 列 issue
+- [x] 7.2 `POST /api/issues` 创建+入队 task;`PATCH /api/issues/{id}/status` 状态机校验转移(复用 s01);`POST /api/issues/{id}/comments` 评论入队 follow-up task;`WS /ws/issues/{id}` 复用 RealtimeHub
+- [x] 7.3 页面:issue 行表 + 创建表单 + 行内状态转移 + 评论框 + 选中行实时进度;`uvicorn` 起 `MULTICA_WEB_PORT`
+- [x] 7.4 `tests/test_web_panel.py`(创建/状态转移/评论各合法与非法路径)
+- [x] 7.5 `s07_web_panel.md`
 
 ## 8. s08 — markdown 技能
 - [ ] 8.1 `Skill`:带 frontmatter(`name`/`description`/`match` 正则)的磁盘 markdown
