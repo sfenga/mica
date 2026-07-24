@@ -471,8 +471,11 @@ class ClaudeCliRunner:
         self.cli = cli
 
     def _cmd(self, prompt: str, append_system_prompt: str | None = None,
-             resume_session_id: str | None = None) -> list[str]:
+             resume_session_id: str | None = None,
+             permission_mode: str = "bypassPermissions") -> list[str]:
         cmd = [self.cli, "-p", "--verbose", "--output-format", "stream-json", prompt]
+        if permission_mode:
+            cmd += ["--permission-mode", permission_mode]
         if append_system_prompt:
             cmd += ["--append-system-prompt", append_system_prompt]
         if resume_session_id:

@@ -4,13 +4,13 @@
 >
 > s12 squads 为可选附录,不属本 spec 契约范围;其实现见 tasks §12,主线 s01–s11 不依赖它。
 >
-> 模型要点:issue 是板子卡(用户产物,状态反映整体生命周期);task 是一次执行尝试(agent_task_queue 一行,有自己的 status/session_id)。1 issue : N tasks。评论不改 issue 状态,而是入队一条新 task。
+> 模型要点:issue 是看板项(用户产物,状态反映整体生命周期);task 是一次执行尝试(agent_task_queue 一行,有自己的 status/session_id)。1 issue : N tasks。评论不改 issue 状态,而是入队一条新 task。
 
 ## ADDED Requirements
 
 ### Requirement: Issue 模型与状态机
 
-系统 SHALL 用 `Issue{id, workspace_id, title, body, status, assignee_type, assignee_id, created_at, updated_at, error?}` 建模板子卡,`status ∈ {backlog, todo, in_progress, in_review, done, blocked, cancelled}`。状态转移 SHALL 仅允许:`backlog→todo`、`todo→in_progress`、`in_progress→in_review|done|blocked`、`in_review→done|in_progress|blocked`、`blocked→todo|cancelled`;其它转移 SHALL 被拒绝并报错。`done` 与 `cancelled` 为终态。Issue 状态 SHALL NOT 因评论而改变(评论走 Task 入队,见「会话延续与评论重跑」)。
+系统 SHALL 用 `Issue{id, workspace_id, title, body, status, assignee_type, assignee_id, created_at, updated_at, error?}` 建模看板项,`status ∈ {backlog, todo, in_progress, in_review, done, blocked, cancelled}`。状态转移 SHALL 仅允许:`backlog→todo`、`todo→in_progress`、`in_progress→in_review|done|blocked`、`in_review→done|in_progress|blocked`、`blocked→todo|cancelled`;其它转移 SHALL 被拒绝并报错。`done` 与 `cancelled` 为终态。Issue 状态 SHALL NOT 因评论而改变(评论走 Task 入队,见「会话延续与评论重跑」)。
 
 #### Scenario: 合法转移
 - **WHEN** 一个 `todo` issue 被认领执行,置为 `in_progress`
@@ -66,7 +66,7 @@
 
 ### Requirement: AgentRunner 抽象与真实 CLI 执行
 
-系统 SHALL 定义 `AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status, output, exit_code, session_id}`。SHALL 提供 `StubRunner`(发合成事件、无子进程)与 `ClaudeCliRunner`(spawn `claude -p --verbose --output-format stream-json "<prompt>"`,逐行解析 stream-json 事件经 `on_event` 转发,exit code 决定 done/failed)。系统 SHALL NOT 用 Anthropic API 假装 agent;模型连接由被 spawn 的真实 CLI 自身完成。事件映射:`assistant` 的 content_block_delta → progress/token;`assistant` 中的 `tool_use` 与 `user` 中的 `tool_result` SHALL 经 `on_event` 透传为 progress(含工具名/状态摘要),不静默丢弃;`result` subtype=success → done;`result` subtype=error 或 exit≠0 → fail;子进程退出但未发出 `result` 事件 SHALL 判 failed(fail-closed)。`ClaudeCliRunner.run` SHALL 从 stream 的 `system`/`result` 事件捕获 `session_id` 写入 `RunResult.session_id`;SHALL NOT 传 `--no-session-persistence`。
+系统 SHALL 定义 `AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status, output, exit_code, session_id}`。SHALL 提供 `StubRunner`(发合成事件、无子进程)与 `ClaudeCliRunner`(spawn `claude -p --verbose --output-format stream-json "<prompt>"`,逐行解析 stream-json 事件经 `on_event` 转发,exit code 决定 done/failed)。`ClaudeCliRunner._cmd` SHALL 默认传 `--permission-mode bypassPermissions`(让 claude 自动批准工具调用,能执行真实编码任务;可通过参数关闭)。系统 SHALL NOT 用 Anthropic API 假装 agent;模型连接由被 spawn 的真实 CLI 自身完成。事件映射:`assistant` 的 content_block_delta → progress/token;`assistant` 中的 `tool_use` 与 `user` 中的 `tool_result` SHALL 经 `on_event` 透传为 progress(含工具名/状态摘要),不静默丢弃;`result` subtype=success → done;`result` subtype=error 或 exit≠0 → fail;子进程退出但未发出 `result` 事件 SHALL 判 failed(fail-closed)。`ClaudeCliRunner.run` SHALL 从 stream 的 `system`/`result` 事件捕获 `session_id` 写入 `RunResult.session_id`;SHALL NOT 传 `--no-session-persistence`。
 
 #### Scenario: stub runner 验证认领机制
 - **WHEN** s02 用 `StubRunner` 跑一个 queued task

@@ -1,4 +1,4 @@
-"""s01 — Issue 板子卡 + 7 态状态机 + 多态 assignee + 看板
+"""s01 — Issue 看板项 + 7 态状态机 + 多态 assignee + 看板
 
 对应 multiCa:issue lifecycle / agents as teammates。
 状态机:backlog→todo→in_progress→in_review|done|blocked;in_review→done|in_progress|blocked;

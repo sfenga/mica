@@ -9,7 +9,7 @@
 
 ## 核心模型:issue / task 分层(贴生产 multiCa)
 
-issue 是板子卡(用户产物,状态反映整体生命周期);task 是一次 agent 执行尝试(`agent_task_queue` 一行,有自己的 status/session_id)。**1 issue : N tasks**,旧 task 行保留作历史。评论不改 issue 状态,而是入队一条新 task——这是与「issue 即执行单元」模型的关键区别,避免评论把刚标完成的卡拨回进行中。
+issue 是看板项(用户产物,状态反映整体生命周期);task 是一次 agent 执行尝试(`agent_task_queue` 一行,有自己的 status/session_id)。**1 issue : N tasks**,旧 task 行保留作历史。评论不改 issue 状态,而是入队一条新 task——这是与「issue 即执行单元」模型的关键区别,避免评论把刚标完成的卡拨回进行中。
 
 ```
 Issue   : id, workspace_id, title, body, status, assignee_type, assignee_id,
@@ -62,10 +62,10 @@ exit≠0  → task failed,     issue -> blocked;    error 落会话
 ## 关键设计决策
 
 ### D1: issue/task 分层(贴生产,非 issue 即执行单元)
-issue 是板子卡(用户产物),task 是执行尝试。评论入队新 task、不改 issue 状态;resume 从上一 task.session_id 续。对应生产 multiCa 的 issue + agent_task_queue 两层。比"issue 即执行单元 + reopen"更合理:板子卡不会因评论跳状态,执行历史可审计(一 issue 多 task 行),续会话靠 task 间 session_id 串。
+issue 是看板项(用户产物),task 是执行尝试。评论入队新 task、不改 issue 状态;resume 从上一 task.session_id 续。对应生产 multiCa 的 issue + agent_task_queue 两层。比"issue 即执行单元 + reopen"更合理:看板项不会因评论跳状态,执行历史可审计(一 issue 多 task 行),续会话靠 task 间 session_id 串。
 
 ### D2: AgentRunner 抽象 + 真实 CLI
-`AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status,output,exit_code,session_id}`。`StubRunner`(s02)验证认领机制;`ClaudeCliRunner`(s03)`subprocess` spawn `claude -p --verbose --output-format stream-json`,逐行解析 stream-json 事件经 `on_event` 转发,exit code 决定 done/failed;fail-closed(无 result 事件 → failed);从 system/result 捕获 session_id。模型连接由 claude 自身完成,不引 `anthropic` SDK。事件映射:`assistant` content_block_delta→progress/token;`tool_use`/`tool_result`→progress(含工具名/状态);`result` subtype=success→done、error→fail。
+`AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status,output,exit_code,session_id}`。`StubRunner`(s02)验证认领机制;`ClaudeCliRunner`(s03)`subprocess` spawn `claude -p --verbose --output-format stream-json`,逐行解析 stream-json 事件经 `on_event` 转发,exit code 决定 done/failed;fail-closed(无 result 事件 → failed);从 system/result 捕获 session_id。`_cmd` 默认传 `--permission-mode bypassPermissions`(让 claude 能自动批工具、执行真实编码任务;对应生产 multiCa)。模型连接由 claude 自身完成,不引 `anthropic` SDK。事件映射:`assistant` content_block_delta→progress/token;`tool_use`/`tool_result`→progress(含工具名/状态);`result` subtype=success→done、error→fail。
 
 ### D3: s02 stub 隔离认领机制
 认领(轮询 task 队列→CAS queued→dispatched→标终态)是命脉,单独一章验证。s02 用 `StubRunner` 发合成事件,使该章及单测不依赖 CLI、不花钱。s03 起换真实 CLI。
