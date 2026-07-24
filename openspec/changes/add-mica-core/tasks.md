@@ -17,12 +17,12 @@
 - [x] 1.5 `tests/test_issue_state.py`(合法/非法转移、review 流转)
 
 ## 2. s02 — Task 实体 + Daemon 认领 task + StubRunner
-- [ ] 2.1 `Task` dataclass:`id, issue_id, assignee_type, assignee_id, status, session_id?, trigger_comment_id?, rerun_of_task_id?, prior_session_id?, created_at, claimed_at, completed_at, error?`;`TaskStatus ∈ {queued, dispatched, running, completed, failed, cancelled}`
-- [ ] 2.2 `TaskStore`:enqueue(for issue,assignee 取自 issue)/list/get/claim(CAS queued→dispatched)/start(dispatched→running)/complete/failed;1 issue : N tasks,旧 task 保留
-- [ ] 2.3 `AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status, output, exit_code, session_id}`;`StubRunner`(合成事件,无子进程)
-- [ ] 2.4 `Daemon`:轮询 TaskStore(assignee==me && queued)→ CAS claim → start → run → complete/failed;task 生命周期驱动 issue 状态(running→in_progress, completed→in_review, failed→blocked+error)
-- [ ] 2.5 `main()`:建 store+agent+daemon,演示一条 issue 入队 task 被认领执行到 completed、issue in_review
-- [ ] 2.6 `s02_task_daemon.md`;`tests/test_task_claim.py`(双 daemon 抢同一 task 只一个赢;task 驱动 issue 状态)
+- [x] 2.1 `Task` dataclass:`id, issue_id, assignee_type, assignee_id, status, session_id?, trigger_comment_id?, rerun_of_task_id?, prior_session_id?, created_at, claimed_at, completed_at, error?`;`TaskStatus ∈ {queued, dispatched, running, completed, failed, cancelled}`
+- [x] 2.2 `TaskStore`:enqueue(for issue,assignee 取自 issue)/list/get/claim(CAS queued→dispatched)/start(dispatched→running)/complete/failed;1 issue : N tasks,旧 task 保留
+- [x] 2.3 `AgentRunner` Protocol:`run(task, issue, context, on_event, resume_session_id=None) -> RunResult{status, output, exit_code, session_id}`;`StubRunner`(合成事件,无子进程)
+- [x] 2.4 `Daemon`:轮询 TaskStore(assignee==me && queued)→ CAS claim → start → run → complete/failed;task 生命周期驱动 issue 状态(running→in_progress, completed→in_review, failed→blocked+error)
+- [x] 2.5 `main()`:建 store+agent+daemon,演示一条 issue 入队 task 被认领执行到 completed、issue in_review
+- [x] 2.6 `s02_task_daemon.md`;`tests/test_task_claim.py`(双 daemon 抢同一 task 只一个赢;task 驱动 issue 状态)
 
 ## 3. s03 — `claude` CLI runner on task
 - [ ] 3.1 `parse_stream_line`(纯函数):system/assistant(text/thinking/tool_use)/user(tool_result)/result(success/error+session_id)/log;control_request 忽略;thinking_tokens/hook 子类型丢弃
