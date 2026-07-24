@@ -480,7 +480,7 @@ class ClaudeCliRunner:
         return cmd   # SHALL NOT 含 --no-session-persistence
 
     def run(self, task, issue, context: list, on_event,
-            resume_session_id: str | None = None) -> dict:
+            resume_session_id: str | None = None) -> RunResult:
         prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
         try:
             proc = subprocess.Popen(
