@@ -33,12 +33,12 @@
 - [x] 3.6 `tests/test_stream_parse.py` + `tests/test_cli_runner_finalize.py`(canned stream + monkeypatched Popen)
 
 ## 4. s04 — JSONL 持久化(issues + tasks + sessions)+ orphan + 截断 summarize
-- [ ] 4.1 `IssueStore`/`TaskStore` 加 `data_dir`:`issues.jsonl`/`tasks.jsonl` 快照追加 + last-wins 重放
-- [ ] 4.2 `SessionStore`:`sessions/<task_id>.jsonl` 事件流(claim/progress/done/fail);append/load
-- [ ] 4.3 重启重放:加载 issue+task,重建状态;`running`/`dispatched` 无 runner 的 task → `failed`+error(orphan 恢复,不重派)
-- [ ] 4.4 溢出 summarize:截断式(留近 N 条 + 1 条 `{type:summary,dropped_count,range}`),不调模型;原子重写
-- [ ] 4.5 daemon 落盘事件到 SessionStore;`data_dir=None` 退化为内存(s01–s03 测试不受影响)
-- [ ] 4.6 `s04_persistence.md`;`tests/test_persistence.py` + `tests/test_orphan_recovery.py`
+- [x] 4.1 `IssueStore`/`TaskStore` 加 `data_dir`:`issues.jsonl`/`tasks.jsonl` 快照追加 + last-wins 重放
+- [x] 4.2 `SessionStore`:`sessions/<task_id>.jsonl` 事件流(claim/progress/done/fail);append/load
+- [x] 4.3 重启重放:加载 issue+task,重建状态;`running`/`dispatched` 无 runner 的 task → `failed`+error(orphan 恢复,不重派)
+- [x] 4.4 溢出 summarize:截断式(留近 N 条 + 1 条 `{type:summary,dropped_count,range}`),不调模型;原子重写
+- [x] 4.5 daemon 落盘事件到 SessionStore;`data_dir=None` 退化为内存(s01–s03 测试不受影响)
+- [x] 4.6 `s04_persistence.md`;`tests/test_persistence.py` + `tests/test_orphan_recovery.py`
 
 ## 5. s05 — 评论建新 task + `--resume` 上一 task.session_id
 - [ ] 5.1 `IssueStore.comment(issue_id, text)`:追加评论记录;**不**改 issue 状态;为 issue assignee 入队新 `queued` task(`trigger_comment_id` 设)
