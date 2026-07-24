@@ -25,12 +25,12 @@
 - [x] 2.6 `s02_task_daemon.md`;`tests/test_task_claim.py`(双 daemon 抢同一 task 只一个赢;task 驱动 issue 状态)
 
 ## 3. s03 — `claude` CLI runner on task
-- [ ] 3.1 `parse_stream_line`(纯函数):system/assistant(text/thinking/tool_use)/user(tool_result)/result(success/error+session_id)/log;control_request 忽略;thinking_tokens/hook 子类型丢弃
-- [ ] 3.2 `ClaudeCliRunner`:`_cmd` = `[cli, "-p", "--verbose", "--output-format", "stream-json", prompt, ...]`;有 `resume_session_id` 加 `--resume`;SHALL NOT 含 `--no-session-persistence`
-- [ ] 3.3 `run`:Popen 流式逐行 → on_event 转发;捕获 session_id(system init + result);fail-closed(无 result→failed, is_error→failed, exit≠0→failed);`FileNotFoundError`→failed(CLI not found)
-- [ ] 3.4 daemon 默认 runner 切换为 `ClaudeCliRunner`
-- [ ] 3.5 `s03_claude_runner.md`(前置:`claude` 已装并登录)
-- [ ] 3.6 `tests/test_stream_parse.py` + `tests/test_cli_runner_finalize.py`(canned stream + monkeypatched Popen)
+- [x] 3.1 `parse_stream_line`(纯函数):system/assistant(text/thinking/tool_use)/user(tool_result)/result(success/error+session_id)/log;control_request 忽略;thinking_tokens/hook 子类型丢弃
+- [x] 3.2 `ClaudeCliRunner`:`_cmd` = `[cli, "-p", "--verbose", "--output-format", "stream-json", prompt, ...]`;有 `resume_session_id` 加 `--resume`;SHALL NOT 含 `--no-session-persistence`
+- [x] 3.3 `run`:Popen 流式逐行 → on_event 转发;捕获 session_id(system init + result);fail-closed(无 result→failed, is_error→failed, exit≠0→failed);`FileNotFoundError`→failed(CLI not found)
+- [x] 3.4 daemon 默认 runner 切换为 `ClaudeCliRunner`
+- [x] 3.5 `s03_claude_runner.md`(前置:`claude` 已装并登录)
+- [x] 3.6 `tests/test_stream_parse.py` + `tests/test_cli_runner_finalize.py`(canned stream + monkeypatched Popen)
 
 ## 4. s04 — JSONL 持久化(issues + tasks + sessions)+ orphan + 截断 summarize
 - [ ] 4.1 `IssueStore`/`TaskStore` 加 `data_dir`:`issues.jsonl`/`tasks.jsonl` 快照追加 + last-wins 重放
