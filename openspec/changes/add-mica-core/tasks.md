@@ -48,11 +48,11 @@
 - [x] 5.5 `s05_comment_resume.md`;`tests/test_comment_resume.py`(评论入队新 task+issue 不变、--resume 上一 task、resume 失效降级、不传 no-session-persistence)
 
 ## 6. s06 — WebSocket 实时
-- [ ] 6.1 `RealtimeHub`:task/issue→订阅者集合;`publish(id, event)` 推给所有订阅者
-- [ ] 6.2 daemon `on_event` 调 hub.publish;WS server 在 `MULTICA_WS_PORT`
-- [ ] 6.3 终端客户端 `task watch <id>`:连 WS、订阅、实时打印
-- [ ] 6.4 晚到订阅者不获历史回放(历史走 s04 JSONL,daemon 不缓冲);`tests/test_realtime.py`
-- [ ] 6.5 `s06_realtime.md`
+- [x] 6.1 `RealtimeHub`:task/issue→订阅者集合;`publish(id, event)` 推给所有订阅者
+- [x] 6.2 daemon `on_event` 调 hub.publish;WS server 在 `MULTICA_WS_PORT`
+- [x] 6.3 终端客户端 `task watch <id>`:连 WS、订阅、实时打印
+- [x] 6.4 晚到订阅者不获历史回放(历史走 s04 JSONL,daemon 不缓冲);`tests/test_realtime.py`
+- [x] 6.5 `s06_realtime.md`
 
 ## 7. s07 — FastAPI 单页看板
 - [ ] 7.1 `GET /`(单页 HTML,内联 JS,无构建);`GET /api/issues` 列 issue
