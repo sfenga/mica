@@ -1,10 +1,10 @@
-# s01 — Issue 板子卡 + 7 态状态机 + 多态 assignee + 看板
+# s01 — Issue 看板项 + 7 态状态机 + 多态 assignee + 看板
 
-mica 的第一章只立住一件事:**一张 issue(板子卡)有哪些状态、能怎么流转、能派给谁**。这是整个系统的地基——issue 是用户看到的任务卡,它的状态机定义了任务从计划到评审到完成的完整生命周期。本章不写执行、不写 agent 怎么跑,只把"板子卡 + 状态"定义清楚。
+mica 的第一章只立住一件事:**一张 issue(看板项)有哪些状态、能怎么流转、能派给谁**。这是整个系统的地基——issue 是用户看到的任务卡,它的状态机定义了任务从计划到评审到完成的完整生命周期。本章不写执行、不写 agent 怎么跑,只把"看板项 + 状态"定义清楚。
 
 ## 一、核心设计思想
 
-第一个思想:**issue 是板子卡,状态反映整体生命周期**。一张 issue 不只有"做没做完",而是一条完整流水线:`backlog`(计划外)→ `todo`(待开始)→ `in_progress`(进行中)→ `in_review`(待人评审)→ `done`(完成);外加两个侧支:`blocked`(卡住)、`cancelled`(取消)。这比"todo/done"两态更贴近真实看板——`in_review` 是评审环节,`blocked` 是卡点,都是日常发生的。
+第一个思想:**issue 是看板项,状态反映整体生命周期**。一张 issue 不只有"做没做完",而是一条完整流水线:`backlog`(计划外)→ `todo`(待开始)→ `in_progress`(进行中)→ `in_review`(待人评审)→ `done`(完成);外加两个侧支:`blocked`(卡住)、`cancelled`(取消)。这比"todo/done"两态更贴近真实看板——`in_review` 是评审环节,`blocked` 是卡点,都是日常发生的。
 
 ```python
 class IssueStatus(str, Enum):
@@ -137,7 +137,7 @@ def render_board(issues: list[Issue]) -> str:
 
 ## 四、与完整 multiCa 的区别
 
-s01 是生产 multiCa 的「板子卡 + 状态机」骨架,纯内存、无执行:
+s01 是生产 multiCa 的「看板项 + 状态机」骨架,纯内存、无执行:
 
 | 维度 | 完整 multiCa(生产) | mica s01 |
 |---|---|---|
@@ -149,4 +149,4 @@ s01 是生产 multiCa 的「板子卡 + 状态机」骨架,纯内存、无执行
 | 看板 | Next.js 全功能 | 终端 `render_board` 文本表格 |
 | workspace 过滤 | 每条查询带 `workspace_id` + 成员资格 | `list(workspace_id)` 过滤(雏形) |
 
-一句话:**s01 保留了 multiCa 的「板子卡语义」(7 态状态机 + 多态 assignee + workspace),抽掉了它的运行时(执行、持久化、前端)**。板子卡的形状和生产一致;谁来推动这些状态流转,不属于本章范围。
+一句话:**s01 保留了 multiCa 的「看板项语义」(7 态状态机 + 多态 assignee + workspace),抽掉了它的运行时(执行、持久化、前端)**。看板项的形状和生产一致;谁来推动这些状态流转,不属于本章范围。
