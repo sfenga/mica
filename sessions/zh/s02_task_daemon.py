@@ -10,6 +10,7 @@ failed→blocked+error)。
 """
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -377,12 +378,17 @@ class Daemon:
         return result
 
     def _sync_issue_status(self, task: Task, running=False, completed=False, failed=False) -> None:
-        """task 生命周期驱动 issue 状态(running→in_progress, completed→in_review, failed→blocked)。"""
+        """task 生命周期驱动 issue 状态(running→in_progress, completed→in_review, failed→blocked)。
+        blocked issue 上新 task 重跑时,blocked→todo→in_progress 两步(状态机不允许 blocked→in_progress)。"""
         issue = self.issue_store.get(task.issue_id)
         if issue is None:
             return
-        if running and issue.status in (IssueStatus.TODO, IssueStatus.IN_REVIEW, IssueStatus.BLOCKED):
-            self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
+        if running:
+            if issue.status == IssueStatus.BLOCKED:
+                self.issue_store.transition(issue.id, IssueStatus.TODO)
+                self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
+            elif issue.status in (IssueStatus.TODO, IssueStatus.IN_REVIEW):
+                self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
         elif completed and issue.status == IssueStatus.IN_PROGRESS:
             self.issue_store.transition(issue.id, IssueStatus.IN_REVIEW)
         elif failed and issue.status == IssueStatus.IN_PROGRESS:
@@ -402,7 +408,6 @@ class Daemon:
             pass
 
     def loop(self) -> None:
-        import time
         while not self._stop:
             self.tick()
             time.sleep(self.poll_interval)

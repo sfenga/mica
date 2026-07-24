@@ -49,8 +49,12 @@ def _sync_issue_status(self, task, running=False, completed=False, failed=False)
     issue = self.issue_store.get(task.issue_id)
     if issue is None:
         return
-    if running and issue.status in (IssueStatus.TODO, IssueStatus.IN_REVIEW, IssueStatus.BLOCKED):
-        self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
+    if running:
+        if issue.status == IssueStatus.BLOCKED:
+            self.issue_store.transition(issue.id, IssueStatus.TODO)
+            self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)  # 两步:blocked→todo→in_progress
+        elif issue.status in (IssueStatus.TODO, IssueStatus.IN_REVIEW):
+            self.issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
     elif completed and issue.status == IssueStatus.IN_PROGRESS:
         self.issue_store.transition(issue.id, IssueStatus.IN_REVIEW)
     elif failed and issue.status == IssueStatus.IN_PROGRESS:
@@ -58,7 +62,7 @@ def _sync_issue_status(self, task, running=False, completed=False, failed=False)
         self.issue_store.transition(issue.id, IssueStatus.BLOCKED)
 ```
 
-注意 `completed → in_review` 而非 `done`:agent 跑完只是"提交评审",不是"终态完成"——评审通过才 `in_review → done`。这让 review 环节在状态机里自然存在(对应 multiCa 的 `in_review` 评审态)。
+注意 `completed → in_review` 而非 `done`:agent 跑完只是"提交评审",不是"终态完成"——评审通过才 `in_review → done`。这让 review 环节在状态机里自然存在(对应 multiCa 的 `in_review` 评审态)。`blocked` issue 上新 task 重跑时,走 `blocked→todo→in_progress` 两步(状态机不允许 `blocked→in_progress` 直跳)。
 
 第四个思想:**StubRunner 隔离认领机制**。s02 用 StubRunner 发合成事件,不 spawn claude、不花钱。认领→执行→标终态这条链路在不需要真实模型的情况下验证清楚。真实 runner 不在本章(StubRunner 是占位)。
 

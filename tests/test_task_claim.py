@@ -1,7 +1,7 @@
-import pytest
+
 from sessions.zh.s02_task_daemon import (
     IssueStore, TaskStore, TaskStatus, IssueStatus, Agent, Daemon,
-    StubRunner, FailingStubRunner, Issue,
+    StubRunner, FailingStubRunner,
 )
 
 
@@ -73,3 +73,20 @@ def test_one_issue_many_tasks_history():
     assert len(tasks) == 2
     assert tasks[0].status == TaskStatus.COMPLETED
     assert tasks[1].status == TaskStatus.QUEUED
+
+
+def test_blocked_issue_re_run_two_step_to_in_progress():
+    """blocked issue 上新 task 重跑:blocked→todo→in_progress(不抛 IllegalTransition)。"""
+    is_ = IssueStore()
+    ts = TaskStore()
+    daemon = Daemon(is_, ts, Agent(id="agent-1", name="A"), StubRunner())
+    issue = is_.create("ws-1", "t", assignee_type="agent", assignee_id="agent-1")
+    ts.enqueue(issue.id, "agent", "agent-1")
+    daemon.run_once()          # issue → in_review, task completed
+    daemon2 = Daemon(is_, ts, Agent(id="agent-1", name="A"), FailingStubRunner())
+    # 手动把 issue 置 blocked(模拟上次 failed):in_review→blocked 需经 in_progress
+    is_.transition(issue.id, IssueStatus.IN_PROGRESS)
+    is_.transition(issue.id, IssueStatus.BLOCKED)
+    ts.enqueue(issue.id, "agent", "agent-1")   # 新 task
+    daemon2.run_once()         # blocked→todo→in_progress→(fail)→blocked
+    assert is_.get(issue.id).status == IssueStatus.BLOCKED
