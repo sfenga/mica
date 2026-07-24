@@ -9,17 +9,18 @@ issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude
 
 | 章 | 主题 |
 |---|---|
-| s01 | Issue 模型 + 看板 + 多态 assignee + 状态机 |
-| s02 | Daemon 认领执行循环(stub runner) |
+| s01 | Issue 模型 + 看板 + 7 态状态机 + 多态 assignee |
+| s02 | Task 实体 + Daemon 认领 task + StubRunner |
 | s03 | `claude` CLI runner,真实模型接入 |
-| s04 | JSONL 持久化 + 会话重放 |
-| s05 | WebSocket 实时进度 |
-| s06 | FastAPI 单页看板 |
-| s07 | markdown 技能注入 |
-| s08 | cron autopilot |
-| s09 | 多 CLI + PATH 探测 |
-| s10 | 多 workspace 隔离 |
-| s11 | (可选附录)squads |
+| s04 | JSONL 持久化(issues+tasks+sessions)+ 重放 + orphan |
+| s05 | 评论建新 task + `--resume` 上一 task |
+| s06 | WebSocket 实时进度 |
+| s07 | FastAPI 单页看板 + 创建/转移/评论 |
+| s08 | markdown 技能注入(`match` 正则) |
+| s09 | cron autopilot |
+| s10 | 多 CLI + PATH 探测(1 daemon : N agent) |
+| s11 | 多 workspace 隔离 + 成员资格 |
+| s12 | (可选附录)squads |
 
 ## 快速开始
 
