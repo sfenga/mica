@@ -97,3 +97,40 @@ def test_rerun_creates_new_task_with_rerun_of():
     t2 = is_.rerun_task(issue.id, ts)
     assert t2.status == TaskStatus.QUEUED
     assert t2.rerun_of_task_id == t1.id
+
+
+def test_resume_prompt_includes_title_and_comment(monkeypatch):
+    """resume 时 prompt 同时含 issue title+body 和评论文本(不是只发评论)。"""
+    import io
+    import sessions.zh.s05_comment_resume as m
+    from sessions.zh.s05_comment_resume import ClaudeCliRunner, Issue, Task
+
+    argv = []
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO(
+                '{"type":"result","subtype":"success","result":"ok","is_error":false,"session_id":"ses-1"}\n'
+            )
+            self.stderr = io.StringIO("")
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **k):
+        argv.append(cmd)
+        return _FakeProc()
+    monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
+
+    issue = Issue(id="i1", workspace_id="ws", title="the-original-task", body="desc here")
+    task = Task(id="t1", issue_id="i1", assignee_type="agent", assignee_id="a1",
+                trigger_comment_id="please also handle X")
+    runner = ClaudeCliRunner()
+    res = runner.run(task, issue, [], lambda e: None, resume_session_id="ses-old")
+    prompt_arg = argv[0][4]  # cmd = [cli, -p, --verbose, --output-format, stream-json, prompt, ...]
+    # actually cmd structure: [cli, "-p", "--verbose", "--output-format", "stream-json", prompt, "--permission-mode", ...]
+    # find prompt (the arg after "stream-json")
+    idx = argv[0].index("stream-json") + 1
+    prompt_arg = argv[0][idx]
+    assert "the-original-task" in prompt_arg          # title 在
+    assert "desc here" in prompt_arg                  # body 在
+    assert "please also handle X" in prompt_arg       # 评论在
+    assert "[Follow-up]" in prompt_arg                 # 标记在

@@ -676,10 +676,9 @@ class ClaudeCliRunner:
 
     def run(self, task, issue, context: list, on_event,
             resume_session_id: str | None = None) -> RunResult:
+        prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
         if resume_session_id and task.trigger_comment_id:
-            prompt = task.trigger_comment_id   # resume:评论文本作新 user turn
-        else:
-            prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
+            prompt += f"\n\n[Follow-up] {task.trigger_comment_id}"
         try:
             proc = subprocess.Popen(
                 self._cmd(prompt, resume_session_id=resume_session_id),
