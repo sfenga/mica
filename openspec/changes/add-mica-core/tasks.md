@@ -10,11 +10,11 @@
 - [ ] 0.5 `conftest.py` + `sessions/__init__.py` + `sessions/zh/__init__.py`(tests 导入用)
 
 ## 1. s01 — Issue 模型 + 7 态状态机 + 多态 assignee + 看板
-- [ ] 1.1 `Issue`/`Agent`/`Member`/`Workspace` dataclass;`IssueStatus ∈ {backlog, todo, in_progress, in_review, done, blocked, cancelled}`;`assignee_type ∈ {member, agent}`
-- [ ] 1.2 `IssueStore`(内存):create/list/get/assign/transition + 状态机校验(仅允许 backlog→todo→in_progress→in_review|done|blocked;in_review→done|in_progress|blocked;blocked→todo|cancelled)
-- [ ] 1.3 CLI:`issue create/list/assign/show`,终端看板
-- [ ] 1.4 `s01_issue_board.md`
-- [ ] 1.5 `tests/test_issue_state.py`(合法/非法转移、review 流转)
+- [x] 1.1 `Issue`/`Agent`/`Member`/`Workspace` dataclass;`IssueStatus ∈ {backlog, todo, in_progress, in_review, done, blocked, cancelled}`;`assignee_type ∈ {member, agent}`
+- [x] 1.2 `IssueStore`(内存):create/list/get/assign/transition + 状态机校验(仅允许 backlog→todo→in_progress→in_review|done|blocked;in_review→done|in_progress|blocked;blocked→todo|cancelled)
+- [x] 1.3 CLI:`issue create/list/assign/show`,终端看板
+- [x] 1.4 `s01_issue_board.md`
+- [x] 1.5 `tests/test_issue_state.py`(合法/非法转移、review 流转)
 
 ## 2. s02 — Task 实体 + Daemon 认领 task + StubRunner
 - [ ] 2.1 `Task` dataclass:`id, issue_id, assignee_type, assignee_id, status, session_id?, trigger_comment_id?, rerun_of_task_id?, prior_session_id?, created_at, claimed_at, completed_at, error?`;`TaskStatus ∈ {queued, dispatched, running, completed, failed, cancelled}`
