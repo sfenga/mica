@@ -1,10 +1,56 @@
-# s01 — Issue 看板项 + 7 态状态机 + 多态 assignee + 看板
+# s01 — Issue 看板项、状态机、assignee
 
-mica 的第一章只立住一件事:**一张 issue(看板项)有哪些状态、能怎么流转、能派给谁**。这是整个系统的地基——issue 是用户看到的任务卡,它的状态机定义了任务从计划到评审到完成的完整生命周期。本章不写执行、不写 agent 怎么跑,只把"看板项 + 状态"定义清楚。
+mica 的第一章只立一件事:**什么是 issue 看板项**。
 
-## 一、核心设计思想
+后面所有章节都会围绕 issue 往下接:
 
-第一个思想:**issue 是看板项,状态反映整体生命周期**。一张 issue 不只有"做没做完",而是一条完整流水线:`backlog`(计划外)→ `todo`(待开始)→ `in_progress`(进行中)→ `in_review`(待人评审)→ `done`(完成);外加两个侧支:`blocked`(卡住)、`cancelled`(取消)。这比"todo/done"两态更贴近真实看板——`in_review` 是评审环节,`blocked` 是卡点,都是日常发生的。
+```text
+issue -> task -> daemon -> runner -> realtime/web
+```
+
+但在执行之前,必须先回答三个问题:
+
+```text
+一张卡有哪些状态?
+状态能不能随便跳?
+这张卡派给人,还是派给 agent?
+```
+
+s01 只处理这三个问题。它不执行任务,不落盘,不调用模型,也不启动后台 daemon。
+
+## 1. Issue 是用户看见的卡
+
+`Issue` 是看板上的任务卡。它描述用户关心的目标,而不是某一次执行尝试:
+
+```python
+@dataclass
+class Issue:
+    id: str
+    workspace_id: str
+    title: str
+    body: str = ""
+    status: IssueStatus = IssueStatus.TODO
+    assignee_type: str = ""
+    assignee_id: str = ""
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+    error: str = ""
+```
+
+这里最重要的字段是:
+
+```text
+status          这张卡处在生命周期的哪一步
+assignee_type   指派对象类型: member / agent / 空
+assignee_id     指派对象的 id
+workspace_id    后续多 workspace 隔离的雏形
+```
+
+生产 multiCa 的初始迁移里,`issue` 表同样有 7 态 `status`,以及 `assignee_type` + `assignee_id`。s01 把这部分抽成单文件 Python 版本。
+
+## 2. 七个状态表达一条完整流水线
+
+状态不是只有 `todo` 和 `done`。mica 使用七个状态:
 
 ```python
 class IssueStatus(str, Enum):
@@ -17,7 +63,23 @@ class IssueStatus(str, Enum):
     CANCELLED = "cancelled"
 ```
 
-第二个思想:**用状态转移表约束合法性,而不是一堆 if**。issue 的状态不能随便跳——`todo` 不能直接到 `done`(必须经过 `in_progress`),`done` 不能复活。所有合法路径集中在一处:
+它们分工如下:
+
+```text
+backlog       还没决定要做
+todo          已决定要做,但还没开始
+in_progress   正在执行
+in_review     执行产物等待人评审
+done          完成
+blocked       卡住,需要人处理
+cancelled     放弃
+```
+
+为什么需要 `in_review`?因为 agent 跑完不等于任务完成。后面 s02 会让 task `completed` 后把 issue 推到 `in_review`,表示“agent 已提交,等人看”。人通过评审后才进 `done`。
+
+## 3. 状态不能随便跳
+
+合法流转集中在 `VALID_TRANSITIONS`:
 
 ```python
 VALID_TRANSITIONS = {
@@ -31,36 +93,18 @@ VALID_TRANSITIONS = {
 }
 ```
 
-`DONE` 和 `CANCELLED` 映射到空集合——**终态**,转不出去。上层拿到的 issue 永远处于合法状态,不必每处判"万一它 done 了怎么办"。
+对应图:
 
-第三个思想:**多态 assignee**。一张 issue 可派给 member(人)或 agent(机器队友),用类型标签 + id 表示:
-
-```python
-@dataclass
-class Issue:
-    id: str
-    workspace_id: str
-    title: str
-    body: str = ""
-    status: IssueStatus = IssueStatus.TODO
-    assignee_type: str = ""       # "" | "member" | "agent"
-    assignee_id: str = ""
-    created_at: str = field(default_factory=now_iso)
-    updated_at: str = field(default_factory=now_iso)
-    error: str = ""
+```text
+backlog -> todo -> in_progress -> in_review -> done
+                         |              |
+                         |              `-> in_progress 返工
+                         `-> blocked -> todo / cancelled
 ```
 
-`assignee_type ∈ {"", "member", "agent"}` + `assignee_id`——agent 和人一样是认领者。要判断"这张卡派给了哪个 agent",就是 `assignee_type == "agent" and assignee_id == that_agent`。
+`done` 和 `cancelled` 是终态,转不出去。`todo -> done` 这种跳跃会被拒绝。
 
-## 二、为什么这么设计
-
-### 为什么 7 个状态,不只 todo/done?
-
-`todo/done` 两态把"进行中"和"评审中"都塌缩了,看不出任务到底在哪个环节。真实看板里,`in_review`(等人评审)和 `in_progress`(正在干)是两个不同阶段——评审中的卡不该当成"还在干",也不该当成"完了"。`blocked` 单独一态,让卡点显式可见(卡住的任务能一眼挑出来解除或取消)。`backlog` 是"还没决定要做"的暂存。多态化状态让看板信息量更大、操作更精确。
-
-### 为什么用转移表,而不是 `start()`/`complete()`/`review()` 一堆方法?
-
-一堆方法各自校验容易漏,且新增状态要改多处。一张"当前状态→可转状态集合"的表,把所有合法路径集中,`transition()` 一次集合查 + 一次放行:
+`IssueStore.transition()` 只做一件事:查表放行或抛错。
 
 ```python
 def transition(self, issue_id: str, new_status: IssueStatus) -> Issue:
@@ -74,79 +118,102 @@ def transition(self, issue_id: str, new_status: IssueStatus) -> Issue:
     return issue
 ```
 
-非法转移统一抛 `IllegalTransition`,易测、易扩展(改表不改逻辑)。
+这样状态规则不散落在一堆 `start()` / `complete()` / `review()` 方法里。后续章节无论是 daemon 推动状态,还是 Web API 推动状态,都复用同一张表。
 
-### 为什么 `in_review` 能回到 `in_progress`?
+## 4. Assignee 是多态的
 
-评审不是单向终点——评审者可能"要求返工"(代码没改好、缺测试)。`in_review→in_progress` 允许返工:卡从评审打回进行中,重做后再提交评审。这是真实代码评审流程的常态。`in_review→done` 是评审通过,`in_review→blocked` 是评审中发现卡点(比如缺依赖)。
+一张 issue 可以派给人,也可以派给 agent。s01 用两个字段表达:
 
-### 为什么多态 assignee,而不是 `agent_id` + `member_id` 两空字段?
-
-两个可空字段会留出"两个都空""两个都填"的非法状态,校验散落。单字段 `assignee_type` + `assignee_id` 用类型标签明确"这是哪种认领者",合法状态只有三种,约束集中。这对应 multiCa 生产库的约定(多态指派 member 或 agent)。
-
-## 三、状态怎么流转
-
-```
-  backlog ──► todo ──► in_progress ──► in_review ──► done
-                            │                │
-                            │                └──► in_progress(返工)
-                            └──► blocked ──► todo(解除) / cancelled(放弃)
+```text
+assignee_type = "member" | "agent" | ""
+assignee_id   = 具体 member/agent 的 id
 ```
 
-- **backlog → todo**:决定要做了,排入计划。
-- **todo → in_progress**:开始干。
-- **in_progress → in_review**:做完,提交评审。
-- **in_progress → done**:跳过评审直接完成(小改动可不评审)。
-- **in_progress → blocked**:卡住(缺依赖、等外部)。
-- **in_review → done**:评审通过。
-- **in_review → in_progress**:要求返工。
-- **in_review → blocked**:评审中发现卡点。
-- **blocked → todo**:解除阻塞,重新入队。
-- **blocked → cancelled**:放弃。
-- **done / cancelled**:终态,转不出去。
+例子:
 
-合法转移只有上面这些,其余一律被 `VALID_TRANSITIONS` 拒。`transition()` 每次刷新 `updated_at`。
+```text
+member:alice
+agent:agent-1
+-
+```
 
-## 试一试
+为什么不用 `member_id` 和 `agent_id` 两个字段?因为两个可空字段会出现“两个都填”的混乱状态。`assignee_type + assignee_id` 明确告诉系统:当前指派对象是哪一种。
+
+后面 s02 的 daemon 会用它判断:
+
+```text
+只有 assignee_type == "agent" 的任务才会被 agent daemon 认领
+```
+
+派给 member 的 issue 会留在看板上,不进入 agent 执行队列。
+
+## 5. 本章的内存 Store
+
+s01 的 `IssueStore` 是纯内存版:
+
+```text
+create       新建 issue
+list         列出全部或某 workspace 的 issue
+get          按 id 获取
+assign       改 assignee
+transition   走状态机
+```
+
+它使用进程内 `dict`,所以程序退出后数据就没了。这个限制会在 s04 通过 JSONL 解决。
+
+## 6. 试一试
+
+运行 demo:
 
 ```bash
-python sessions/zh/s01_issue_board.py            # 跑演示看板(一条 done + 一条 todo)
-python -m pytest tests/test_issue_state.py -v    # 7 态状态机单测
+python sessions/zh/s01_issue_board.py
 ```
 
-演示看板(无参 demo 跑一条 issue 走 todo→in_progress→in_review→done):
+无参 demo 会创建两张卡:
 
-```
-ID            STATUS       ASSIGNEE                TITLE
-...           done         agent:agent-1           修登录 bug
-...           todo         member:alice            写文档
-```
-
-看板的 `ASSIGNEE` 列把 `assignee_type:assignee_id` 直接打出来:
-
-```python
-def render_board(issues: list[Issue]) -> str:
-    if not issues:
-        return "(空看板)"
-    lines = ["ID            STATUS       ASSIGNEE                TITLE"]
-    for i in issues:
-        assignee = f"{i.assignee_type}:{i.assignee_id}" if i.assignee_type else "-"
-        lines.append(f"{i.id[:12]:<13} {i.status.value:<12} {assignee:<23} {i.title}")
-    return "\n".join(lines)
+```text
+修登录 bug   agent:agent-1   todo -> in_progress -> in_review -> done
+写文档       member:alice    todo
 ```
 
-## 四、与完整 multiCa 的区别
+运行测试:
 
-s01 是生产 multiCa 的「看板项 + 状态机」骨架,纯内存、无执行:
+```bash
+python -m pytest tests/test_issue_state.py -v
+```
 
-| 维度 | 完整 multiCa(生产) | mica s01 |
-|---|---|---|
-| 语言/栈 | Go(Chi + sqlc)+ Next.js | Python 单文件 |
-| 存储 | PostgreSQL,sqlc 生成 | 进程内 `dict`,无持久化 |
-| 状态集 | backlog/todo/in_progress/in_review/done/blocked/cancelled | **完全一致**(7 态) |
-| 状态机 | DB 约束 + 应用层 | `VALID_TRANSITIONS` 表 + `transition()` |
-| 多态 assignee | `assignee_type` + `assignee_id` 指向 member/agent | **完全一致** |
-| 看板 | Next.js 全功能 | 终端 `render_board` 文本表格 |
-| workspace 过滤 | 每条查询带 `workspace_id` + 成员资格 | `list(workspace_id)` 过滤(雏形) |
+测试覆盖:
 
-一句话:**s01 保留了 multiCa 的「看板项语义」(7 态状态机 + 多态 assignee + workspace),抽掉了它的运行时(执行、持久化、前端)**。看板项的形状和生产一致;谁来推动这些状态流转,不属于本章范围。
+```text
+默认创建状态
+合法状态转移
+非法状态转移
+done/cancelled 终态
+in_review 返工
+blocked 解除或取消
+多态 assignee
+workspace_id 过滤
+```
+
+## 7. 本章边界
+
+s01 做了:
+
+```text
+Issue 数据形状
+7 态状态机
+多态 assignee
+终端看板渲染
+```
+
+s01 不做:
+
+```text
+Task 执行队列        下一章 s02
+daemon 认领          下一章 s02
+真实 CLI runner      s03
+持久化               s04
+评论续聊             s05
+```
+
+一句话总结:**s01 把“看板卡片本身”定义清楚。issue 是用户视角的生命周期,不是 agent 的一次执行记录。**

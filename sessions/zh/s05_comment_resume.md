@@ -1,119 +1,310 @@
-# s05 — 评论建新 task + `--resume` 上一 task
+# s05 — 评论触发新 task 与 `--resume`
 
-s04 让 mica 经得起重启了,但还有个问题:用户在 issue 评论区补充信息后想让 agent 接着干,怎么办?如果直接 reopen issue(把 done/in_review 拨回 todo),板子上刚标完成的卡又跳回进行中,用户会困惑。s05 用生产 multiCa 的方式解决:**评论不改 issue 状态,而是入队一条新 queued task**;daemon 认领新 task 时,查同一条 issue 上一条 task 的 `session_id`,用 `claude -p --resume <id>` 让 claude 重新载入上次会话,新评论作为新 user turn 带历史继续。
+s04 让系统能重启恢复。现在还有一个协作问题:
 
-## 一、核心设计思想
-
-第一个思想:**评论 = 入队新 task,issue 状态不动**。评论只做两件事:追加到 issue 的 `comments` 列表;为 issue 的 assignee 入队一条新 `queued` task(`trigger_comment_id` 指向评论文本)。issue 状态**不变**——`in_review` 的 issue 评论后还是 `in_review`,只是 task 队列里多了一行:
-
-```python
-def comment(issue_store, task_store, issue_id, text):
-    """评论:追加评论 + 入队新 queued task。issue 状态不变。"""
-    issue = issue_store.comment(issue_id, text)     # 只追加 comments
-    return task_store.enqueue(issue_id, issue.assignee_type, issue.assignee_id,
-                             trigger_comment_id=text)   # 新 task
+```text
+agent 跑完后,issue 进入 in_review
+用户在评论里补一句:“再处理一下 X”
+系统应该怎么让 agent 接着干?
 ```
 
-这和 s02 的「为 issue 入队 task」是同一个 TaskStore.enqueue,只是这次由评论触发。issue 不需要 reopen——它的状态是高层板子状态,不该因一句评论跳来跳去。
+一个坏方案是把 issue 从 `in_review` 拨回 `todo`。这会让看板状态乱跳:用户只是补充了一条评论,不代表整张卡要被重新打开。
 
-第二个思想:**resume 从上一 task 的 session_id**。daemon 认领一条 task 时,查同 `(issue, agent)` 的上一条 `completed` task 的 `session_id`:
+s05 的方案是:
+
+```text
+评论不改变 issue 状态
+评论会入队一条新的 task
+daemon 认领新 task 时,用上一条 task.session_id 调 claude --resume
+```
+
+也就是说,评论触发的是“新的执行尝试”,不是“重写 issue 状态”。
+
+## 1. 评论只追加,不改状态
+
+s05 给 `Issue` 增加 `comments`:
 
 ```python
-def _find_prior_session_id(self, task):
+comments: list = field(default_factory=list)
+```
+
+`IssueStore.comment()` 只做追加:
+
+```python
+def comment(self, issue_id: str, text: str) -> Issue:
+    issue = self._require(issue_id)
+    issue.comments.append(text)
+    issue.updated_at = now_iso()
+    self._persist(issue)
+    return issue
+```
+
+注意:这里没有 `transition()`。
+
+所以:
+
+```text
+in_review issue 收到评论后,仍然是 in_review
+blocked issue 收到评论后,仍然是 blocked
+done issue 收到评论后,仍然是 done
+```
+
+评论本身不是状态转移。状态仍由人或 task 生命周期推动。
+
+## 2. 评论会入队新 task
+
+评论后想让 agent 行动,需要显式入队 task:
+
+```python
+def comment_and_enqueue(issue_store: IssueStore, task_store: "TaskStore",
+                        issue_id: str, text: str) -> Task:
+    issue = issue_store.comment(issue_id, text)
+    return task_store.enqueue(issue.id, issue.assignee_type, issue.assignee_id,
+                              trigger_comment_id=text)
+```
+
+这条 task 和首次执行的 task 一样,都是 `queued`。差别是它记录了:
+
+```text
+trigger_comment_id = 评论文本
+```
+
+在生产 multiCa 里,`trigger_comment_id` 是 comment 表里的 UUID。mica 为了单文件教学,直接把评论文本放进去。语义是一样的:这次执行是由哪条评论触发的。
+
+## 3. 为什么是新 task,不是改旧 task
+
+旧 task 是历史:
+
+```text
+第一次执行 task    completed, session_id=s1
+评论触发 task      queued
+再次执行后         completed, session_id=s1 或新 session
+```
+
+如果在旧 task 上“继续跑”,就看不出第一次执行什么时候结束、第二次执行什么时候开始。新 task 保留了执行历史,也给每次执行自己的状态、时间、错误和 session_id。
+
+这就是 issue/task 分层的价值:
+
+```text
+issue 仍是一张卡
+task 记录每一次 agent 尝试
+```
+
+## 4. daemon 认领时查上一条 session
+
+daemon 认领一条 task 后,会查同一条 issue、同一个 agent 的上一条已完成 task:
+
+```python
+def _find_prior_session_id(self, task: Task) -> str:
     all_tasks = self.task_store.list(task.issue_id)
     prior = [t for t in all_tasks
              if t.id != task.id
+             and t.assignee_type == task.assignee_type
              and t.assignee_id == task.assignee_id
              and t.status == TaskStatus.COMPLETED
              and t.session_id]
-    return prior[-1].session_id if prior else ""
+    if prior:
+        return prior[-1].session_id
+    return ""
 ```
 
-如果有上一条,把它的 `session_id` 作为 `resume_session_id` 传给 `ClaudeCliRunner.run`——命令里会带 `--resume <id>`,claude 从磁盘重新载入上次会话,新评论作为新 user turn 接在历史之后。没有上一条(首次执行)则不传 `--resume`,全新会话。
-
-第三个思想:**resume 时 prompt 始终含原任务 + 评论追加**。`ClaudeCliRunner.run` 始终以 `issue.title + body` 为基础;resume 时追加 `trigger_comment_id`(评论文本)作 `[Follow-up]`:
+如果找到了,就传给 runner:
 
 ```python
-def run(self, task, issue, context, on_event, resume_session_id=None):
-    prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
-    if resume_session_id and task.trigger_comment_id:
-        prompt += f"\n\n[Follow-up] {task.trigger_comment_id}"
-```
-
-为什么不是只发评论?因为 `--resume` 可能失效——如果只发评论、resume 没接上,claude 开了全新 session 但只有一句孤立评论,没有原任务上下文,不知道在干什么。始终带 title+body 保证即使 resume 失效,新 session 也有完整任务上下文 + 评论,能从头继续。生产 multiCa 不内联 issue 上下文,而是给 issue ID + 指引 agent 自己跑 `multica issue get` 拉上下文(`prompt.go:215`);mica 的 claude 没有 `multica` CLI,所以必须内联。
-
-第四个思想:**resume 失效用新 id 覆盖**。`--resume` 不是百分百命中——如果 session 在 claude 那边已失效,claude 吐回一个全新的 `session_id`(不是传入的)。mica 的处理:始终用 `RunResult.session_id` 覆盖 task 的 `session_id`——命中时 claude 回吐同一个 id(覆盖是 no-op),失效时给新 id(覆盖成新 id):
-
-```python
-# Daemon.execute
 result = self.runner.run(task, issue, [], on_event,
                          resume_session_id=prior_sid or None)
+```
+
+`ClaudeCliRunner._cmd()` 会加:
+
+```text
+--resume <prior_session_id>
+```
+
+这让 Claude CLI 载入上一轮会话,把新评论作为新的 user turn 接着处理。
+
+生产 multiCa 的 claim handler 也会解析 prior session/workdir。真实系统更复杂:manual rerun 会优先从指定源 task 恢复,普通 follow-up 才查最近的 `(agent, issue)` session,并且会过滤“有毒”的失败会话。mica s05 保留最小规则:找上一条 completed task 的 session_id。
+
+## 5. resume prompt 必须带原任务和评论
+
+`ClaudeCliRunner.run()` 的 prompt 始终从 issue 本体开始:
+
+```python
+prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
+if resume_session_id and task.trigger_comment_id:
+    prompt += f"\n\n[Follow-up] {task.trigger_comment_id}"
+```
+
+也就是说,评论续聊时的 prompt 是:
+
+```text
+issue.title
+
+issue.body
+
+[Follow-up] 评论内容
+```
+
+不是只有评论内容。
+
+为什么?因为 `--resume` 可能没接上。如果只发评论,一旦 resume 失效,Claude 会开一个全新会话,只看到一句“再处理一下 X”,没有原任务上下文。带上 title/body 后,即使降级成新会话,它仍然知道原任务是什么。
+
+生产 multiCa 的 prompt 构造更依赖系统内工具和上下文读取;mica 没有完整 multica CLI,所以把必要上下文直接放进 prompt。
+
+## 6. resume 没接上怎么办
+
+`--resume <old>` 不保证一定成功。Claude 可能返回一个新的 `session_id`。
+
+mica 的规则是:
+
+```text
+RunResult.session_id 有值 -> 覆盖当前 task.session_id
+```
+
+代码:
+
+```python
 if result.get("session_id"):
     self.task_store.set_session_id(task.id, result["session_id"])
 ```
 
-不沿用失效的旧 id,免得下次又 resume 不到。行为自愈,不卡流程。
+两种情况:
 
-## 二、为什么这么设计
-
-### 为什么评论不改 issue 状态,而是入队新 task?
-
-issue 是给用户看的板子项——它的 `in_review` / `done` 表示"整体到哪了"。如果评论就把它拨回 `todo` / `in_progress`,板子上刚标评审通过/完成的卡又跳回进行中,用户困惑(我明明评审完了,怎么又变进行中了?)。入队新 task 是生产 multiCa 的做法:issue 不动,task 队列里多一行,daemon 认领那行去跑。多次评论 = task 队列里多行,每行一次执行,session_id 串起来续会话。
-
-### 为什么 resume 从 task 的 session_id,不是 issue 上的?
-
-session_id 是 claude 一次执行尝试的会话标识,它属于 task(一次执行),不属于 issue(板子项)。一条 issue 可能跑了多次(首次 + 评论续聊 + 手动重跑),每次是不同的 task、可能有不同的 session_id(如果某次 resume 失效换了新 id)。从 task 取 session_id 精确到"上一条执行的会话",而不是 issue 上模糊的"某次"。
-
-### 为什么 resume 失效用"覆盖"而不是报错?
-
-claude 的 `--resume` 失效是常态化的(会话被清、过期)。如果报错,task 就卡住——人得手动清 session_id 才能重跑。直接用 claude 回吐的新 id 覆盖,等于"resume 没接上就当全新会话从头来,顺便记下新 id 供下次"。行为自愈,不卡流程。
-
-### 为什么手动重跑建新 task,不在原 task 上续?
-
-一条 task 行是一次执行尝试的完整记录(状态、session_id、时间、结果)。在原 task 上"续"会篡改历史——你看不出"这条 task 原来跑过一次,后来又重跑了"。建新 task(`rerun_of_task_id` 指向源 task)保留了执行历史:旧 task 行不动(还是 completed/failed),新 task 行是新的执行。这和多评论入队多 task 是同一个模型:每次执行一条 task 行。
-
-## 三、评论 → 续聊怎么流转
-
-```
-  首次跑 issue(无 prior task)
-        │  ClaudeCliRunner.run(resume_session_id=None) → prompt=title+body
-        │  捕获 session_id → task.session_id
-        │  task completed → issue in_review
-        ▼
-  用户评论 comment_and_enqueue(issue, "也处理一下 X")
-        │  追加到 issue.comments;入队新 queued task(trigger_comment_id="也处理一下 X")
-        │  issue 状态不变(仍 in_review)
-        ▼
-  daemon 认领新 task(又 queued 了)
-        │  _find_prior_session_id → 上一 completed task 的 session_id
-        │  ClaudeCliRunner.run(resume_session_id=prior_sid) → prompt=trigger_comment_id(评论文本)
-        │  命中:claude 回吐同 id,覆盖 no-op;失效:回吐新 id,覆盖
-        ▼
-  claude --resume 重新载入上次会话 + 评论文本 → 带历史继续 → task completed
+```text
+resume 成功: 返回还是 old id,覆盖是 no-op
+resume 失败: 返回 new id,当前 task 记录 new id
 ```
 
-`session_id` 是首次跑捕获、之后每次重跑覆盖的——它把多次 `claude -p` 调用串成一条逻辑会话。`trigger_comment_id` 给 resume 提供新 turn,`_find_prior_session_id` 给 resume 提供续会话的 id,三者合起来就是"评论区续聊"。
+这样下次再续聊时,会从最新可用 session 继续,不会一直拿失效 id 重试。
 
-## 试一试
+## 7. 手动重跑也是新 task
+
+手动 rerun 不会修改旧 task,而是新建 task:
+
+```python
+def rerun_task(self, source_task_id: str) -> Task:
+    source = self._require(source_task_id)
+    return self.enqueue(source.issue_id, source.assignee_type, source.assignee_id,
+                        rerun_of_task_id=source.id)
+```
+
+`rerun_of_task_id` 保存来源:
+
+```text
+旧 task     failed/completed,不动
+新 task     queued,rerun_of_task_id=旧 task id
+```
+
+这和评论触发一样:每次执行都是新 task,历史不被覆盖。
+
+## 8. 整体链路
+
+```text
+首次执行
+   |
+   |-- task t1 queued -> running -> completed
+   |-- Claude 返回 session_id=s1
+   |-- issue -> in_review
+   |
+用户评论 "再处理一下 X"
+   |
+   |-- issue.comments 追加文本
+   |-- issue.status 不变
+   |-- 新 task t2 queued, trigger_comment_id="再处理一下 X"
+   |
+daemon 认领 t2
+   |
+   |-- _find_prior_session_id(t2) -> s1
+   |-- ClaudeCliRunner.run(resume_session_id=s1)
+   |-- prompt = title + body + [Follow-up] 评论
+   |
+Claude 执行
+   |
+   |-- resume 成功: session_id 仍是 s1
+   |-- resume 失败: session_id 变成 s2
+   |
+task t2 completed
+issue -> in_review
+```
+
+这条链路有一个核心约束:
+
+```text
+评论不直接改 issue 状态
+```
+
+issue 状态只会在新 task 真正 running/completed/failed 时被 daemon 推动。
+
+## 9. 和生产 multiCa 的关系
+
+从生产代码看,真实评论分流比 mica 更复杂:
+
+```text
+如果已有 queued/dispatched task,会尝试把评论合并进未开始的 task
+如果已有 active task,会 defer,让完成后的 reconcile 覆盖评论
+如果没有可覆盖的 task,才入队新的 task
+manual rerun 会精确从源 task 恢复,避免并行 task 抢错 session
+失败会话会按 failure_reason 过滤,避免 resume 到有毒上下文
+```
+
+mica s05 把这些生产分支折叠成一条教学规则:
+
+```text
+每条评论 -> 新建 queued task
+新 task -> resume 上一条 completed task.session_id
+```
+
+这样能先看懂最重要的模型:评论不是 reopen issue,而是触发一次新的 agent 执行。
+
+## 10. 试一试
+
+单测不调真 `claude`:
 
 ```bash
-python -m pytest tests/test_comment_resume.py -v   # 评论/resume 单测(不调真 claude)
-python sessions/zh/s05_comment_resume.py           # demo:2 次真 claude(首次 + resume)
+python -m pytest tests/test_comment_resume.py -v
 ```
 
-demo 第 1 次跑 issue "Reply with exactly: mica s05 first" → done,打印捕获的 `session_id`;然后 `comment_and_enqueue` 入队新 task;第 2 次跑(带 `--resume`)claude 重新载入上次会话 + 评论作新 turn → 回复新内容 → done。两次 `claude -p` 调用靠 `session_id` 串成同一条会话。
+测试覆盖:
 
-> `claude` 未装/未登录时,`ClaudeCliRunner` 返回 `failed`(`CLI not found`),session_id 为空,task 标 failed、issue 标 blocked,不静默跳过。
+```text
+评论追加且不改变 issue 状态
+comment_and_enqueue 创建 queued task
+daemon 找上一条 session_id 并传 resume
+resume 返回新 session 时覆盖当前 task
+无 prior task 时不传 resume
+rerun 创建新 task,保留 rerun_of_task_id
+resume prompt 包含 title 和 follow-up 评论
+```
 
-## 四、与完整 multiCa 的区别
+demo 会调真实 CLI:
 
-| 维度 | 完整 multiCa(生产) | mica s05 |
-|---|---|---|
-| 评论触发 | `CreateComment` → `triggerTasksForComment` → 三路分流(合并进 queued / active 暂存兜底 / 新建) | 简化:始终新建 queued task |
-| issue 状态 | 评论不改 | **完全一致**(评论不改) |
-| resume 机制 | claim 时填 `PriorSessionID`(从上一 task 取),daemon 拼 `--resume` | 同(daemon `_find_prior_session_id` → `--resume`) |
-| resume 失效 | `resolveSessionID`:resume did not land → 清死 id | 用 RunResult 的新 id 覆盖 task.session_id |
-| prompt 选择 | 往 stdin 写新 user turn | `trigger_comment_id` 作 prompt(resume 时) |
-| 手动重跑 | `RerunIssue` 建新 task(`rerun_of_task_id`) | 同(`IssueStore.rerun_task`) |
+```bash
+python sessions/zh/s05_comment_resume.py
+```
 
-一句话:**s05 用「评论入队新 task + `--resume` 上一 task.session_id」把 multiCa「评论区续聊」做出来了——issue 状态不动,task 队列多一行,session_id 跨执行串会话,resume 失效自愈覆盖**;砍掉的是生产的三路评论分流(合并/暂存),简化为始终新建。
+需要本机已安装并登录 `claude`。如果没装,runner 会返回 failed,task 标 failed,issue 标 blocked。
+
+## 11. 本章边界
+
+s05 做了:
+
+```text
+issue comments
+评论入队新 task
+查上一条 task.session_id
+claude --resume
+resume 失效时记录新 session_id
+手动 rerun 新建 task
+```
+
+s05 不做:
+
+```text
+评论合并进 pending task
+active task 完成后 reconcile 评论
+有毒 session 过滤
+workdir 复用
+多 agent/squad 评论路由
+```
+
+一句话总结:**s05 把“用户追评后让 agent 接着干”接起来。评论不改 issue 状态,而是制造下一次 task;session_id 把多次执行串成一条会话。**
