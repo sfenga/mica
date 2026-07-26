@@ -154,15 +154,15 @@
 
 ### Requirement: Markdown 技能注入
 
-系统 SHALL 把 `workspace/skills/**/SKILL.md` 下带 frontmatter 的 markdown 视为技能;frontmatter 字段 SHALL 含 `name`、`description`、`match`(`match` 为正则,作用于 `issue.title` + `issue.body`)。`SkillLoader` SHALL 扫描技能目录,对每条技能用 `match` 正则测试当前 issue 的 title+body,取第一个命中的技能;无 `match` 字段的技能永不被自动选中;选中后经 `claude --append-system-prompt "<skill 正文>"` 注入 CLI 调用。换技能文件 SHALL 不改代码即生效。
+系统 SHALL 把 `workspace/skills/**/SKILL.md` 下带 frontmatter 的 markdown 视为技能;frontmatter 字段 SHALL 含 `name`、`description`、`keywords`(逗号分隔关键词,子串匹配 `issue.title` + `issue.body`)。`SkillLoader` SHALL 扫描技能目录,对每条技能用 `keywords` 关键词子串匹配 issue 的 title+body,取第一个命中的技能;无 `keywords` 字段的技能永不被自动选中;选中后技能正文 SHALL 拼入 user prompt(不进 `--append-system-prompt`)。换技能文件 SHALL 不改代码即生效。
 
-#### Scenario: 按 match 字段选中技能
-- **WHEN** skill `match: "fix.*bug"` 且 issue.title 命中
-- **THEN** `SkillLoader` 选中它,`ClaudeCliRunner` 调用含 `--append-system-prompt`
+#### Scenario: 按 keywords 关键词选中技能
+- **WHEN** skill `keywords: "fix,bug"` 且 issue.title 含关键词 "fix" 或 "bug"
+- **THEN** `SkillLoader` 选中它,技能正文拼入 user prompt
 
 #### Scenario: 无匹配技能照常执行
-- **WHEN** issue 不命中任何技能的 `match`
-- **THEN** runner 不带 `--append-system-prompt`,照常执行
+- **WHEN** issue 不命中任何技能的 `keywords`
+- **THEN** runner 不带技能正文,照常执行
 
 ### Requirement: Cron Autopilot
 

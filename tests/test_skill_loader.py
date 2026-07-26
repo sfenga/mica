@@ -14,7 +14,7 @@ def test_match_selects_skill():
     d, _ = _tmp_skill("""---
 name: code-review
 description: review code
-match: review|审.*查
+keywords: review, 审查
 ---
 Focus on security.""")
     loader = SkillLoader(d)
@@ -39,7 +39,7 @@ No match field.""")
 def test_no_match_runs_without_skill():
     d, _ = _tmp_skill("""---
 name: code-review
-match: review
+keywords: review
 ---
 Focus on security.""")
     loader = SkillLoader(d)
@@ -60,9 +60,9 @@ def test_first_match_wins():
     os.makedirs(os.path.join(d2, "a"), exist_ok=True)
     os.makedirs(os.path.join(d2, "b"), exist_ok=True)
     with open(os.path.join(d2, "a", "SKILL.md"), "w") as f:
-        f.write("---\nname: first\nmatch: fix\n---\nbody a")
+        f.write("---\nname: first\nkeywords: fix\n---\nbody a")
     with open(os.path.join(d2, "b", "SKILL.md"), "w") as f:
-        f.write("---\nname: second\nmatch: fix.*bug\n---\nbody b")
+        f.write("---\nname: second\nkeywords: fix.*bug\n---\nbody b")
     loader = SkillLoader(d2)
     issue = Issue(id="i1", workspace_id="ws", title="fix login bug")
     skill = loader.select(issue)
@@ -80,7 +80,7 @@ def test_skill_body_is_markdown_content():
     d, _ = _tmp_skill("""---
 name: deploy
 description: deploy guide
-match: deploy
+keywords: deploy
 ---
 ## Deploy Steps
 1. Build

@@ -62,10 +62,10 @@
 - [x] 7.5 `s07_web_panel.md`
 
 ## 8. s08 — markdown 技能
-- [x] 8.1 `Skill`:带 frontmatter(`name`/`description`/`match` 正则)的磁盘 markdown
-- [x] 8.2 `SkillLoader`:扫 `workspace/skills/**/SKILL.md`,用 `match` 测 issue.title+body,取首个命中;无 `match` 不自动选中
-- [x] 8.3 `ClaudeCliRunner` 经 `--append-system-prompt "<skill 正文>"` 注入选中技能
-- [x] 8.4 示例 skill `workspace/skills/code-review/SKILL.md`(带 `match`)
+- [x] 8.1 `Skill`:带 frontmatter(`name`/`description`/`keywords` 关键词)的磁盘 markdown
+- [x] 8.2 `SkillLoader`:扫 `workspace/skills/**/SKILL.md`,用 `keywords` 关键词子串匹配 issue.title+body,取首个命中;无 `keywords` 不自动选中
+- [x] 8.3 技能正文拼入 user prompt(不进 `--append-system-prompt`)
+- [x] 8.4 示例 skill `workspace/skills/code-review/SKILL.md`(带 `keywords`)
 - [x] 8.5 `tests/test_skill_loader.py`;`s08_skills.md`
 
 ## 9. s09 — Autopilot(cron)

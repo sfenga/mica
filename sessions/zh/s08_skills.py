@@ -2,8 +2,8 @@
 
 在 s07(FastAPI 单页看板)之上叠加:
 - Skill dataclass + SkillLoader:扫 workspace/skills/**/SKILL.md,解析 frontmatter
-  (---name/description/match---),用 match 正则测 issue.title+body,首个命中即选中。
-  无 match 字段的不自动选中;空目录返回空列表。
+  (---name/description/keywords---),用 keywords 关键词子串匹配 issue.title+body,首个命中即选中。
+  无 keywords 字段的不自动选中;空目录返回空列表。
 - ClaudeCliRunner.run 加 append_system_prompt 参数,透传给 _cmd(拼 --append-system-prompt)。
 - AgentRunner Protocol + StubRunner 同步加 append_system_prompt(StubRunner 忽略)。
 - Daemon(..., skill_loader=None):execute 里若 skill_loader 已注入,先 select(issue)
@@ -76,21 +76,21 @@ class RealtimeHub:
 
 
 # ===========================================================================
-# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.match 正则选技能)
+# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
-    match: str          # 正则,作用于 issue.title + issue.body;空串=不自动选中
-    body: str           # markdown 正文(skill 内容)
-    path: str = ""      # SKILL.md 文件路径
+    keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
+    body: str = ""         # markdown 正文(skill 内容)
+    path: str = ""         # SKILL.md 文件路径
 
 
 class SkillLoader:
-    """扫 workspace/skills/**/SKILL.md,按 frontmatter.match 正则选技能。
+    """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
 
-    扫描顺序:sorted glob(recursive)。首个命中即选中(无 match 字段的不自动选中)。
+    扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
     """
 
     def __init__(self, skills_dir: str):
@@ -108,7 +108,7 @@ class SkillLoader:
                 self._skills.append(skill)
 
     def _parse(self, path: str) -> Skill | None:
-        """解析 SKILL.md:---name/description/match--- + 正文。"""
+        """解析 SKILL.md:---name/description/keywords--- + 正文。"""
         with open(path, encoding="utf-8") as f:
             content = f.read()
         # 解析 frontmatter(--- 之间的 key: value)
@@ -127,17 +127,19 @@ class SkillLoader:
         return Skill(
             name=fields.get("name", ""),
             description=fields.get("description", ""),
-            match=fields.get("match", ""),
+            keywords=fields.get("keywords", ""),
             body=body,
             path=path,
         )
 
     def select(self, issue) -> Skill | None:
-        """用 match 正则测 issue.title+body,取首个命中。无 match 字段的不选。"""
+        """用 keywords 关键词子串匹配 issue.title+body,取首个命中。无 keywords 字段的不选。"""
         text = issue.title + "\n" + (issue.body or "")
         for skill in self._skills:
-            if skill.match and re.search(skill.match, text):
-                return skill
+            if skill.keywords:
+                for kw in skill.keywords.split(","):
+                    if kw.strip().lower() in text:
+                        return skill
         return None
 
     def list(self) -> list[Skill]:
@@ -588,12 +590,13 @@ class AgentRunner(Protocol):
     def run(self, task: Task, issue: Issue, context: list,
             on_event: Callable[[dict], None],
             resume_session_id: str | None = None,
-            append_system_prompt: str | None = None) -> RunResult: ...
+            append_system_prompt: str | None = None,
+            skill_body: str | None = None) -> RunResult: ...
 
 class StubRunner:
     """合成事件、无子进程、不调模型。append_system_prompt 被忽略。"""
     def run(self, task, issue, context, on_event, resume_session_id=None,
-            append_system_prompt=None):
+            append_system_prompt=None, skill_body=None):
         on_event({"type": "progress", "task_id": task.id,
                   "message": f"stub: start '{issue.title}'"})
         on_event({"type": "progress", "task_id": task.id, "message": "stub: working..."})
@@ -605,7 +608,7 @@ class StubRunner:
 class FailingStubRunner:
     """失败变体:返回 failed。append_system_prompt 被忽略。"""
     def run(self, task, issue, context, on_event, resume_session_id=None,
-            append_system_prompt=None):
+            append_system_prompt=None, skill_body=None):
         on_event({"type": "fail", "task_id": task.id, "output": "stub failed: boom"})
         return {"status": "failed", "output": "stub failed: boom",
                 "exit_code": 1, "session_id": ""}
@@ -693,7 +696,7 @@ class Daemon:
             skill = self.skill_loader.select(issue)
         result = self.runner.run(task, issue, [], on_event,
                                  resume_session_id=prior_sid or None,
-                                 append_system_prompt=skill.body if skill else None)
+                                 skill_body=skill.body if skill else None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
             self.task_store.set_session_id(task.id, result["session_id"])
@@ -816,8 +819,11 @@ class ClaudeCliRunner:
 
     def run(self, task, issue, context: list, on_event,
             resume_session_id: str | None = None,
-            append_system_prompt: str | None = None) -> RunResult:
+            append_system_prompt: str | None = None,
+            skill_body: str | None = None) -> RunResult:
         prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
+        if skill_body:
+            prompt += f"\n\n[Skill]\n{skill_body}"
         if resume_session_id and task.trigger_comment_id:
             prompt += f"\n\n[Follow-up] {task.trigger_comment_id}"
         try:
@@ -1114,7 +1120,7 @@ def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub)
 EXAMPLE_SKILL_MD = """---
 name: code-review
 description: 审查代码变更,关注安全/正确性/可维护性
-match: review|审.*查|PR
+keywords: review, 审查, PR, code review
 ---
 
 You are reviewing code. Focus on:
