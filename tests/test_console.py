@@ -340,6 +340,23 @@ def test_get_task_not_found(tmp_path):
     assert "not found" in res["error"]
 
 
+def test_trace_events_after_daemon(tmp_path):
+    """Trace 视图数据源:daemon 跑完后 GET /api/tasks/{id} 含事件流。"""
+    client, is_, ts, *_ = _client(tmp_path)
+    issue = is_.create("ws-1", "do thing", assignee_type="agent",
+                      assignee_id="agent-1")
+    ts.enqueue(issue.id, "agent", "agent-1")
+    client.post("/api/daemon/run-once")
+    task = ts.list(issue.id)[0]
+    res = client.get(f"/api/tasks/{task.id}").json()
+    assert res["status"] == "completed"
+    assert len(res["events"]) > 0
+    kinds = [e.get("type") or e.get("kind") for e in res["events"]]
+    # daemon 记 claim/result;StubRunner 记 progress/done
+    assert "claim" in kinds
+    assert "done" in kinds
+
+
 
 def test_member_added_then_can_access_ws2(tmp_path):
     """端到端:add member 后 gate 放行。"""

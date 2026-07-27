@@ -2188,6 +2188,14 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .modal .body{overflow:auto;padding:8px 12px;flex:1}
   .modal .fs-item{padding:7px 10px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px;transition:background .12s}
   .modal .fs-item:hover{background:var(--accent-light);color:var(--accent)}
+
+  /* Execution trace */
+  .trace{display:flex;flex-direction:column;gap:3px}
+  .trace .tr-row{display:flex;align-items:flex-start;gap:8px;padding:6px 10px;border-radius:6px;background:var(--surface2);font-family:var(--mono);font-size:11px;border-left:3px solid var(--border)}
+  .trace .tr-row .tr-ic{flex:0 0 auto;font-size:13px;line-height:1.4}
+  .trace .tr-row .tr-lbl{flex:0 0 auto;font-weight:600;min-width:70px}
+  .trace .tr-row .tr-body{flex:1;color:var(--text);word-break:break-word;white-space:pre-wrap;max-height:160px;overflow:auto}
+  .trace .tr-row .tr-body.muted{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -2292,7 +2300,12 @@ async function loadView(v){
     const d=await api('/api/tasks?workspace_id='+encodeURIComponent(state.ws));
     list.innerHTML=tasksTable(d)+'<p style="margin-top:8px"><button class="btn" onclick="runDaemonOnce()">▶ Run daemon once</button></p>';
   } else if(state.view==='trace'){
-    list.innerHTML='<p class="empty">select a task from Tasks view</p>';
+    const tasks=await api('/api/tasks?workspace_id='+encodeURIComponent(state.ws));
+    let opts='<option value="">select a task...</option>';
+    (tasks||[]).forEach(t=>{opts+='<option value="'+t.id+'"'+(state.selType==='task'&&state.selId===t.id?' selected':'')+'>'+short(t.id)+' '+t.status+' ('+short(t.issue_id)+')</option>';});
+    const auto=(state.selType==='task'&&state.selId);
+    list.innerHTML='<div style="margin-bottom:12px"><select id="trace-task" onchange="loadTrace(this.value)" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:8px;font-size:13px;font-family:var(--mono);min-width:280px">'+opts+'</select></div><div class="trace" id="trace-body"><p class="empty">'+(auto?'loading...':'select a task to see its execution trace')+'</p></div>';
+    if(auto) loadTrace(state.selId);
   } else if(state.view==='skills'){
     const d=await api('/api/skills');
     let h='<form class="inline" onsubmit="previewSkill(event)"><input name="title" placeholder="issue title"><input name="body" placeholder="body"><button class="btn primary">Preview</button></form>';
@@ -2344,6 +2357,34 @@ function tasksTable(d){
   let h='<div class="list-row head" style="grid-template-columns:90px 90px 90px 80px 90px 1fr"><span>ID</span><span>Status</span><span>Issue</span><span>Agent</span><span>Session</span><span>Error</span></div>';
   d.forEach(t=>{h+='<div class="list-row" style="grid-template-columns:90px 90px 90px 80px 90px 1fr" onclick="selectObject(&#39;task&#39;,&#39;'+t.id+'&#39;)"><span>'+short(t.id)+'</span><span>'+badge(t.status)+'</span><span>'+short(t.issue_id)+'</span><span>'+(t.assignee_id||'-')+'</span><span>'+short(t.session_id)+'</span><span>'+(t.error||'')+'</span></div>';});
   return h||'<p class="empty">no tasks</p>';
+}
+async function loadTrace(taskId){
+  const body=el('trace-body');
+  if(!body) return;
+  if(!taskId){body.innerHTML='<p class="empty">select a task to see its execution trace</p>';return;}
+  const t=await api('/api/tasks/'+taskId);
+  if(t&&t.error){body.innerHTML='<p class="empty" style="color:var(--err)">⛔ '+esc(t.error)+'</p>';return;}
+  const events=t.events||[];
+  let h='<div style="margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">'+badge(t.status)+' task '+short(t.id)+' · '+events.length+' event(s) · session '+short(t.session_id)+'</div>';
+  if(!events.length){h+='<p class="empty">no events recorded (task not executed yet, or StubRunner)</p>';body.innerHTML=h;return;}
+  h+='<div class="trace">';
+  events.forEach(function(e){
+    var icon='·', cls='var(--muted)', label=e.kind||e.type||'event', txt='';
+    if(e.kind==='text'){icon='💬';cls='var(--text)';txt=esc(e.text);}
+    else if(e.kind==='thinking'){icon='💭';cls='var(--muted)';txt=esc(e.text);}
+    else if(e.kind==='tool_use'){icon='🔧';cls='var(--info)';txt='tool: '+esc(e.tool);}
+    else if(e.kind==='tool_result'){icon=e.is_error?'⚠️':'✔';cls=e.is_error?'var(--err)':'var(--ok)';txt='result for '+short(e.tool_use_id)+(e.is_error?' (error)':'');}
+    else if(e.kind==='system'){icon='⚙';cls='var(--muted)';txt='session '+short(e.session_id);}
+    else if(e.kind==='log'){icon='📜';cls='var(--muted)';txt=esc(e.message);}
+    else if(e.type==='claim'){icon='📌';cls='var(--info)';txt='daemon claimed task';}
+    else if(e.type==='progress'){icon='⏳';cls='var(--info)';txt=esc(e.message||'working...');}
+    else if(e.type==='done'){icon='✅';cls='var(--ok)';txt='runner finished';}
+    else if(e.type==='result'){icon='🏁';cls='var(--accent)';txt='result: '+(e.is_error?'failed':'ok')+(e.output?' · '+esc(String(e.output).slice(0,200)):'');}
+    else if(e.type==='fail'){icon='❌';cls='var(--err)';txt=esc(e.output||'failed');}
+    h+='<div class="tr-row" style="border-left-color:'+cls+'"><span class="tr-ic">'+icon+'</span><span class="tr-lbl" style="color:'+cls+'">'+label+'</span><span class="tr-body '+(cls==='var(--muted)'?'muted':'')+'">'+txt+'</span></div>';
+  });
+  h+='</div>';
+  body.innerHTML=h;
 }
 
 async function selectObject(type, id){
