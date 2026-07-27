@@ -2178,37 +2178,46 @@ async function selectObject(type, id){
   if(type==='issue' && data){(data.tasks||[]).forEach(t=>rel+='<a onclick="selectObject(&#39;task&#39;,&#39;'+t.id+'&#39;)">task '+short(t.id)+' '+t.status+'</a>');(data.children||[]).forEach(c=>rel+='<a onclick="selectObject(&#39;issue&#39;,&#39;'+c.id+'&#39;)">child '+short(c.id)+' '+c.title+'</a>');}
   el('ins-rel').innerHTML=rel;
   if(type==='issue' && data){
-    // 格式化渲染 issue detail(不 dump JSON)
-    let h='<div style="margin-bottom:12px">';
-    h+='<h3 style="color:var(--accent);margin-bottom:4px">'+data.title+'</h3>';
-    h+='<div style="margin-bottom:8px">'+badge(data.status)+' <span style="color:var(--muted);font-family:var(--mono);font-size:11px">'+(data.assignee_type||'-')+':'+(data.assignee_id||'-')+'</span></div>';
-    if(data.body) h+='<div style="color:var(--muted);font-size:12px;margin-bottom:8px">'+data.body+'</div>';
-    // 状态转移按钮(根据当前状态显示合法转移)
-    h+='<div style="margin:8px 0">';
+    // issue 详情渲染到 Main 全宽(不在 Inspector)
+    let h='<div style="margin-bottom:16px">';
+    h+='<button class="btn" style="margin-bottom:12px" onclick="loadView(state.view)">← Back</button>';
+    h+='<h3 style="color:var(--accent);margin-bottom:6px;font-size:18px">'+data.title+'</h3>';
+    h+='<div style="margin-bottom:8px">'+badge(data.status)+' <span style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-left:8px">'+(data.assignee_type||'-')+':'+(data.assignee_id||'-')+'</span></div>';
+    if(data.body) h+='<div style="color:var(--muted);font-size:13px;margin-bottom:12px;line-height:1.6">'+data.body+'</div>';
+    // 状态转移按钮
+    h+='<div style="margin:12px 0">';
     var st=data.status;
     var trans={todo:[{l:'Start',s:'in_progress'}],in_progress:[{l:'Submit review',s:'in_review'},{l:'Done',s:'done'},{l:'Block',s:'blocked'}],in_review:[{l:'Approve → Done',s:'done'},{l:'Request changes',s:'in_progress'},{l:'Block',s:'blocked'}],blocked:[{l:'Reopen',s:'todo'},{l:'Cancel',s:'cancelled'}],backlog:[{l:'Plan',s:'todo'}]};
     (trans[st]||[]).forEach(t=>{h+='<button class="btn" style="margin-right:6px" onclick="transitionIssue(&#39;'+id+'&#39;,&#39;'+t.s+'&#39;)">'+t.l+'</button>';});
+    // Run daemon 按钮(issue 详情页也能直接跑)
+    h+='<button class="btn primary" style="margin-left:8px" onclick="runDaemonOnce()">▶ Run daemon</button>';
     h+='</div>';
     h+='</div>';
-    // 评论列表(agent 结果 + 人评论)
-    h+='<h3 style="font-size:13px;margin:12px 0 6px">Comments</h3>';
-    h+='<div style="max-height:300px;overflow-y:auto">';
-    (data.comments||[]).forEach((c,idx)=>{
-      let isAgent = c.startsWith('[agent') || c.startsWith('[agent ');
-      let cls = isAgent ? 'var(--accent)' : 'var(--info)';
-      let bg = isAgent ? 'var(--accent-light)' : 'var(--surface2)';
-      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 12px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'">'+c+'</div>';
+    // 活动 + 评论 feed(全宽)
+    h+='<div style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:8px"><b style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Activity &amp; Comments</b></div>';
+    // 任务事件(activity)
+    (data.tasks||[]).forEach(t=>{
+      h+='<div style="padding:6px 12px;margin-bottom:4px;font-size:11px;color:var(--muted);font-family:var(--mono);border-left:2px solid var(--info)">task '+short(t.id)+' → '+t.status+(t.error?' — '+t.error:'')+'</div>';
     });
-    if(!(data.comments||[]).length) h+='<p class="empty">no comments yet</p>';
-    h+='</div>';
-    // 评论表单
-    h+='<form class="inline" style="margin-top:8px" onsubmit="addComment(event,&#39;'+id+'&#39;)">';
+    // 评论(agent 结果 + 人评论)
+    (data.comments||[]).forEach(c=>{
+      let isAgent = c.startsWith('[agent');
+      let cls = isAgent ? 'var(--accent)' : 'var(--info)';
+      let bg = isAgent ? 'var(--accent-light)' : 'var(--surface)';
+      let label = isAgent ? '🤖 Agent' : '👤 Comment';
+      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 14px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'"><div style="font-size:10px;color:'+cls+';font-weight:600;margin-bottom:2px">'+label+'</div>'+c+'</div>';
+    });
+    if(!(data.comments||[]).length && !(data.tasks||[]).length) h+='<p class="empty">no activity yet</p>';
+    // 评论表单(底部)
+    h+='<form class="inline" style="margin-top:12px" onsubmit="addComment(event,&#39;'+id+'&#39;)">';
     h+='<input name="text" placeholder="add a comment..." style="flex:1">';
     h+='<button class="btn primary">Comment</button>';
     h+='</form>';
-    el('detail').innerHTML=h;
+    el('list').innerHTML=h;
+    el('list-title').textContent='Issue Detail';
   } else {
-    el('detail').innerHTML='<pre>'+JSON.stringify(data, null, 2)+'</pre>';
+    // 非 issue 对象:Inspector 显示 JSON
+    el('ins-json').textContent=JSON.stringify(data, null, 2);
   }
   if(type==='issue') renderTrace(data);
 }
@@ -2247,7 +2256,7 @@ async function previewSkill(e){e.preventDefault();const f=new FormData(e.target)
 async function addMember(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/workspaces/'+state.ws+'/members?member_id='+encodeURIComponent(f.get('member_id')),{method:'POST'});loadView();}
 async function addComment(e,id){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues/'+id+'/comments?text='+encodeURIComponent(f.get('text')||''),{method:'POST'});selectObject('issue',id);}
 async function transitionIssue(id,status){try{await fetch('/api/issues/'+id+'/status?status='+status,{method:'PATCH'});selectObject('issue',id);loadView();}catch(e){setStatus('error: '+e.message,'var(--err)');}}
-async function runDaemonOnce(){try{setStatus('running daemon...','var(--info)');const d=await api('/api/daemon/run-once',{method:'POST'});setStatus('daemon ran: '+d.run+' task(s)','var(--ok)');loadView();}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function runDaemonOnce(){try{setStatus('running daemon...','var(--info)');const d=await api('/api/daemon/run-once',{method:'POST'});setStatus('daemon ran: '+d.run+' task(s)','var(--ok)');if(state.selType==='issue'&&state.selId){selectObject('issue',state.selId);}else{loadView();}}catch(e){setStatus('error: '+e.message,'var(--err)');}}
 async function autopilotTick(){const d=await api('/api/autopilots/tick',{method:'POST'});setStatus('autopilot tick: '+d.triggered,'var(--ok)');loadView();}
 async function seedDemo(){const d=await api('/api/demo/seed',{method:'POST'});setStatus('seeded: '+d.issues+' issues','var(--ok)');loadView();}
 async function resetDemo(){const d=await api('/api/demo/reset',{method:'POST'});setStatus('reset','var(--warn)');loadView();}
