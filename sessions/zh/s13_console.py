@@ -2135,7 +2135,7 @@ async function loadView(v){
     list.innerHTML=cards+feed;
   } else if(state.view==='issues'){
     const d=await api('/api/issues');
-    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><button class="btn primary">+ New</button></form>'+issuesTable(d);
+    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><button class="btn primary">+ New</button></form>'+issuesTable(d);
   } else if(state.view==='tasks'){
     const d=await api('/api/tasks');
     list.innerHTML=tasksTable(d)+'<p style="margin-top:8px"><button class="btn" onclick="runDaemonOnce()">▶ Run daemon once</button></p>';
@@ -2271,7 +2271,7 @@ function renderTimeline(issue){
 }
 function renderTrace(issue){el('tl-panel').querySelector('h2').textContent='Lifecycle — '+short(issue.id);}
 
-async function createIssue(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1'}),{method:'POST'});loadView();}
+async function createIssue(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1'}),{method:'POST'});loadView();}
 async function createAutopilot(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/autopilots?'+new URLSearchParams({cron:f.get('cron'),agent_id:f.get('agent_id'),title:f.get('title')}),{method:'POST'});loadView();}
 async function createSquad(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/squads?'+new URLSearchParams({name:f.get('name'),leader_agent_id:f.get('leader_agent_id'),member_agent_ids:f.get('member_agent_ids')}),{method:'POST'});loadView();}
 async function previewSkill(e){e.preventDefault();const f=new FormData(e.target);const d=await fetch('/api/skills/preview?'+new URLSearchParams({title:f.get('title')||'',body:f.get('body')||''}),{method:'POST'}).then(r=>r.json());alert('Matched: '+(d.matched?d.matched.name:'none')+'\\n\\n'+(d.injected_prompt||''));}
@@ -2286,7 +2286,10 @@ function watchIssue(id){if(state.wsSocket) state.wsSocket.close();state.wsSocket
 function switchWorkspace(w){state.ws=w;loadView();}
 function switchMember(m){state.member=m;}
 document.querySelectorAll('.nav .item').forEach(n=>n.addEventListener('click',()=>loadView(n.dataset.v)));
-loadView('overview');
+// Populate dropdowns
+  fetch('/api/workspaces').then(r=>r.json()).then(d=>{const sel=el('ws');sel.innerHTML='';(d||[]).forEach(w=>{const o=document.createElement('option');o.value=w.id;o.text=w.slug+' ('+w.id+')';sel.appendChild(o);});});
+  el('member').innerHTML='<option value="alice">alice</option><option value="bob">bob</option>';
+  loadView('overview');
 </script>
 </body>
 </html>
