@@ -230,6 +230,81 @@ class Member:
 
 
 # ===========================================================================
+# s13 — Project dataclass + ProjectStore(内存,与 IssueStore 同模式)
+# 每个 project 绑定一个本地目录(local_path);issue 通过 project_id 关联。
+# ===========================================================================
+@dataclass
+class Project:
+    id: str
+    workspace_id: str
+    name: str
+    local_path: str = ""    # 本地目录路径(空=继承 cwd)
+    repo_url: str = ""
+
+
+class ProjectStore:
+    """内存 project 存储。data_dir 给定则 JSONL snapshot-append 后端。"""
+
+    def __init__(self, data_dir: str | None = None) -> None:
+        self._projects: dict[str, Project] = {}
+        self._lock = threading.Lock()
+        self._path: str | None = None
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            self._path = os.path.join(data_dir, "projects.jsonl")
+            self._load()
+
+    def _load(self) -> None:
+        if not self._path or not os.path.exists(self._path):
+            return
+        with open(self._path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                project = Project(
+                    id=rec["id"],
+                    workspace_id=rec["workspace_id"],
+                    name=rec.get("name", ""),
+                    local_path=rec.get("local_path", ""),
+                    repo_url=rec.get("repo_url", ""),
+                )
+                self._projects[project.id] = project   # last-wins
+
+    def _persist(self, project: Project) -> None:
+        if not self._path:
+            return
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(project), ensure_ascii=False) + "\n")
+
+    def create(self, workspace_id: str, name: str,
+               local_path: str = "", repo_url: str = "") -> Project:
+        with self._lock:
+            project = Project(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                name=name,
+                local_path=local_path,
+                repo_url=repo_url,
+            )
+            self._projects[project.id] = project
+            self._persist(project)
+            return project
+
+    def list(self, workspace_id: str | None = None) -> list[Project]:
+        with self._lock:
+            return [
+                p for p in self._projects.values()
+                if workspace_id is None or p.workspace_id == workspace_id
+            ]
+
+    def get(self, project_id: str) -> Project | None:
+        with self._lock:
+            return self._projects.get(project_id)
+
+
+# ===========================================================================
 # s11 — MemberStore(members.jsonl:workspace_id -> {member_id}) + WorkspaceScope
 # ===========================================================================
 class MemberStore:
@@ -322,6 +397,7 @@ class Issue:
     assignee_type: str = ""       # "" | "member" | "agent" | "squad"
     assignee_id: str = ""
     parent_issue_id: str = ""     # s12:子 issue 指向父 issue
+    project_id: str = ""          # s13:关联 project(空=无项目)
     stage: int | None = None      # s12:阶段号;None 表示不参加显式 stage
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -352,6 +428,7 @@ def _issue_from_dict(d: dict) -> Issue:
         assignee_type=d.get("assignee_type", ""),
         assignee_id=d.get("assignee_id", ""),
         parent_issue_id=d.get("parent_issue_id", ""),
+        project_id=d.get("project_id", ""),
         stage=d.get("stage"),
         created_at=d.get("created_at", ""),
         updated_at=d.get("updated_at", ""),
@@ -395,7 +472,8 @@ class IssueStore:
                parent_issue_id: str = "", stage: int | None = None,
                status: IssueStatus = IssueStatus.TODO,
                member_id: str | None = None,
-               member_store: "MemberStore | None" = None) -> Issue:
+               member_store: "MemberStore | None" = None,
+               project_id: str = "") -> Issue:
         if member_id and member_store:
             if not member_store.is_member(workspace_id, member_id):
                 raise PermissionError(
@@ -409,6 +487,7 @@ class IssueStore:
             assignee_type=assignee_type,
             assignee_id=assignee_id,
             parent_issue_id=parent_issue_id,
+            project_id=project_id,
             stage=stage,
         )
         self._issues[issue.id] = issue
@@ -579,6 +658,7 @@ class Task:
     is_leader_task: bool = False  # s12:leader 角色 task,claim 时注入 squad briefing
     squad_id: str = ""            # s12:leader/worker task 属于哪个 squad
     handoff_note: str = ""        # s12:leader 委派或系统唤醒原因
+    workdir: str = ""             # s13:执行该 task 的工作目录(空=继承 cwd)
     created_at: str = field(default_factory=now_iso)
     claimed_at: str = ""
     completed_at: str = ""
@@ -608,6 +688,7 @@ def _task_from_dict(d: dict) -> Task:
         is_leader_task=d.get("is_leader_task", False),
         squad_id=d.get("squad_id", ""),
         handoff_note=d.get("handoff_note", ""),
+        workdir=d.get("workdir", ""),
         created_at=d.get("created_at", ""),
         claimed_at=d.get("claimed_at", ""),
         completed_at=d.get("completed_at", ""),
@@ -771,12 +852,13 @@ class AgentRunner(Protocol):
             on_event: Callable[[dict], None],
             resume_session_id: str | None = None,
             append_system_prompt: str | None = None,
-            skill_body: str | None = None) -> RunResult: ...
+            skill_body: str | None = None,
+            cwd: str | None = None) -> RunResult: ...
 
 class StubRunner:
     """合成事件、无子进程、不调模型。"""
     def run(self, task, issue, context, on_event, resume_session_id=None,
-            append_system_prompt=None, skill_body=None):
+            append_system_prompt=None, skill_body=None, cwd=None):
         on_event({"type": "progress", "task_id": task.id,
                   "message": f"stub: start '{issue.title}'"})
         on_event({"type": "progress", "task_id": task.id, "message": "stub: working..."})
@@ -788,7 +870,7 @@ class StubRunner:
 class FailingStubRunner:
     """失败变体:返回 failed。"""
     def run(self, task, issue, context, on_event, resume_session_id=None,
-            append_system_prompt=None, skill_body=None):
+            append_system_prompt=None, skill_body=None, cwd=None):
         on_event({"type": "fail", "task_id": task.id, "output": "stub failed: boom"})
         return {"status": "failed", "output": "stub failed: boom",
                 "exit_code": 1, "session_id": ""}
@@ -805,7 +887,8 @@ class Daemon:
                  poll_interval: float = 2.0,
                  session_store: "SessionStore | None" = None,
                  hub: "RealtimeHub | None" = None,
-                 skill_loader: "SkillLoader | None" = None) -> None:
+                 skill_loader: "SkillLoader | None" = None,
+                 project_store: "ProjectStore | None" = None) -> None:
         # s10:1:N daemon。runtime_id 标识本 daemon(托管本 runtime 上所有 agent);
         # agent_id 仅为兼容 s02 的 1:1 模式保留,claim_next 不再按它过滤。
         self.issue_store = issue_store
@@ -817,6 +900,7 @@ class Daemon:
         self.session_store = session_store
         self.hub = hub
         self.skill_loader = skill_loader
+        self.project_store = project_store
         self._stop = False
 
     def _record(self, task_id: str, event: dict) -> None:
@@ -861,6 +945,14 @@ class Daemon:
 
     def execute(self, task: Task) -> RunResult:
         issue = self.issue_store.get(task.issue_id)
+        # s13:从 issue.project_id 解析 workdir(project.local_path)。
+        workdir = ""
+        if issue is not None and issue.project_id and self.project_store is not None:
+            project = self.project_store.get(issue.project_id)
+            if project:
+                workdir = project.local_path
+        task.workdir = workdir
+        self.task_store._persist(task)
         # 查同 (issue, agent) 上一 task 的 session_id
         prior_sid = self._find_prior_session_id(task)
         task.prior_session_id = prior_sid   # 记录用于审计
@@ -881,7 +973,8 @@ class Daemon:
             skill = self.skill_loader.select(issue)
         result = self.runner.run(task, issue, [], on_event,
                                  resume_session_id=prior_sid or None,
-                                 skill_body=skill.body if skill else None)
+                                 skill_body=skill.body if skill else None,
+                                 cwd=workdir or None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
             self.task_store.set_session_id(task.id, result["session_id"])
@@ -1011,7 +1104,8 @@ class ClaudeCliRunner:
     def run(self, task, issue, context: list, on_event,
             resume_session_id: str | None = None,
             append_system_prompt: str | None = None,
-            skill_body: str | None = None) -> RunResult:
+            skill_body: str | None = None,
+            cwd: str | None = None) -> RunResult:
         prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
         if skill_body:
             prompt += f"\n\n[Skill]\n{skill_body}"
@@ -1022,6 +1116,7 @@ class ClaudeCliRunner:
                 self._cmd(prompt, append_system_prompt=append_system_prompt,
                           resume_session_id=resume_session_id),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=cwd,
             )
         except FileNotFoundError:
             return {"status": "failed", "output": f"CLI not found: {self.cli}",
@@ -1930,6 +2025,16 @@ def _agent_to_dict(a: "Agent") -> dict:
     return {"id": a.id, "name": a.name, "cli": a.cli, "runtime_id": a.runtime_id}
 
 
+def _project_to_dict(p: "Project") -> dict:
+    return {
+        "id": p.id,
+        "workspace_id": p.workspace_id,
+        "name": p.name,
+        "local_path": p.local_path,
+        "repo_url": p.repo_url,
+    }
+
+
 CONSOLE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2063,6 +2168,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <div class="item" data-v="runtimes">Runtime</div>
     <div class="item" data-v="workspaces">Workspaces</div>
     <div class="item" data-v="squads">Squads</div>
+    <div class="item" data-v="projects">Projects</div>
   </div>
   <div class="main">
     <div class="panel" id="list-panel"><h2 id="list-title">Overview</h2><div id="list"></div></div>
@@ -2135,7 +2241,10 @@ async function loadView(v){
     list.innerHTML=cards+feed;
   } else if(state.view==='issues'){
     const d=await api('/api/issues');
-    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><button class="btn primary">+ New</button></form>'+issuesTable(d);
+    const projs=await api('/api/projects');
+    let projOpts='<option value="">no project</option>';
+    (projs||[]).forEach(p=>{projOpts+='<option value="'+p.id+'">'+esc(p.name)+' ('+short(p.id)+')</option>';});
+    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><select name="project_id" title="project (optional)">'+projOpts+'</select><button class="btn primary">+ New</button></form>'+issuesTable(d);
   } else if(state.view==='tasks'){
     const d=await api('/api/tasks');
     list.innerHTML=tasksTable(d)+'<p style="margin-top:8px"><button class="btn" onclick="runDaemonOnce()">▶ Run daemon once</button></p>';
@@ -2174,6 +2283,12 @@ async function loadView(v){
       (s.members||[]).forEach(m=>{h+='<div class="'+(m.member_id===s.leader_agent_id?'lead':'m')+'">@'+m.member_id+' ('+m.member_type+(m.role?', '+m.role:'')+')'+(m.skills&&m.skills.length?' ['+m.skills.join(',')+']':'')+'</div>';});
       h+='</div></div>';});
     list.innerHTML=h||'<p class="empty">no squads</p>';
+  } else if(state.view==='projects'){
+    const d=await api('/api/projects');
+    let h='<form class="inline" onsubmit="createProject(event)"><input name="name" placeholder="project name" required><input name="local_path" placeholder="/path/to/repo (optional)"><input name="repo_url" placeholder="git url (optional)"><button class="btn primary">+ New</button></form>';
+    h+='<div class="list-row head" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>ID</span><span>Name</span><span>Local Path</span><span>Repo</span><span></span></div>';
+    (d||[]).forEach(p=>{h+='<div class="list-row" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>'+short(p.id)+'</span><span>'+esc(p.name)+'</span><span style="font-size:11px">'+esc(p.local_path||'-')+'</span><span style="font-size:11px">'+esc(p.repo_url||'-')+'</span><span></span></div>';});
+    list.innerHTML=h||'<p class="empty">no projects</p>';
   }
 }
 function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="sub">'+(sub||'')+'</div></div>';}
@@ -2205,6 +2320,7 @@ async function selectObject(type, id){
     h+='<button class="btn" style="margin-bottom:12px" onclick="loadView(state.view)">← Back</button>';
     h+='<h3 style="color:var(--accent);margin-bottom:6px;font-size:18px">'+data.title+'</h3>';
     h+='<div style="margin-bottom:8px">'+badge(data.status)+' <span style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-left:8px">'+(data.assignee_type||'-')+':'+(data.assignee_id||'-')+'</span></div>';
+    if(data.workdir) h+='<div style="margin-bottom:8px;font-size:12px;color:var(--muted);font-family:var(--mono)">📁 Workdir: '+esc(data.workdir)+'</div>';
     if(data.body) h+='<div style="color:var(--muted);font-size:13px;margin-bottom:12px;line-height:1.6">'+data.body+'</div>';
     // 状态转移按钮
     h+='<div style="margin:12px 0">';
@@ -2271,7 +2387,8 @@ function renderTimeline(issue){
 }
 function renderTrace(issue){el('tl-panel').querySelector('h2').textContent='Lifecycle — '+short(issue.id);}
 
-async function createIssue(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1'}),{method:'POST'});loadView();}
+async function createIssue(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1',project_id:f.get('project_id')||''}),{method:'POST'});loadView();}
+async function createProject(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/projects?'+new URLSearchParams({name:f.get('name'),local_path:f.get('local_path')||'',repo_url:f.get('repo_url')||''}),{method:'POST'});loadView();}
 async function createAutopilot(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/autopilots?'+new URLSearchParams({cron:f.get('cron'),agent_id:f.get('agent_id'),title:f.get('title')}),{method:'POST'});loadView();}
 async function createSquad(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/squads?'+new URLSearchParams({name:f.get('name'),leader_agent_id:f.get('leader_agent_id'),member_agent_ids:f.get('member_agent_ids')}),{method:'POST'});loadView();}
 async function previewSkill(e){e.preventDefault();const f=new FormData(e.target);const d=await fetch('/api/skills/preview?'+new URLSearchParams({title:f.get('title')||'',body:f.get('body')||''}),{method:'POST'}).then(r=>r.json());alert('Matched: '+(d.matched?d.matched.name:'none')+'\\n\\n'+(d.injected_prompt||''));}
@@ -2301,7 +2418,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                        skill_loader=None, autopilot_store=None,
                        scheduler=None, member_store=None,
                        squad_router=None, daemon=None,
-                       runtime=None) -> FastAPI:
+                       runtime=None, project_store=None) -> FastAPI:
     """构造 Mission Control app;路由闭包持有全部 stores/services。"""
     app = FastAPI(title="mica Mission Control")
 
@@ -2378,10 +2495,12 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     @app.post("/api/issues")
     def create_issue(title: str = "", assignee_type: str = "agent",
                      assignee_id: str = "", body: str = "",
-                     workspace_id: str = "ws-1"):
+                     workspace_id: str = "ws-1",
+                     project_id: str = ""):
         issue = issue_store.create(
             workspace_id, title or "(untitled)", body=body,
-            assignee_type=assignee_type, assignee_id=assignee_id)
+            assignee_type=assignee_type, assignee_id=assignee_id,
+            project_id=project_id)
         if assignee_type == "agent" and assignee_id:
             task_store.enqueue(issue.id, assignee_type, assignee_id)
         elif assignee_type == "squad" and assignee_id and squad_router:
@@ -2396,6 +2515,13 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         d = _issue_to_dict(issue)
         d["tasks"] = [_task_to_dict(t) for t in task_store.list(issue_id)]
         d["children"] = [_issue_to_dict(c) for c in issue_store.children(issue_id)]
+        # s13:解析 issue 关联 project 的 workdir 供前端展示
+        workdir = ""
+        if issue.project_id and project_store is not None:
+            project = project_store.get(issue.project_id)
+            if project:
+                workdir = project.local_path
+        d["workdir"] = workdir
         return d
 
     @app.patch("/api/issues/{issue_id}/status")
@@ -2593,6 +2719,22 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         return {"task_id": task.id if task else "",
                 "reawakened": task is not None}
 
+    # --- Projects ---
+    @app.get("/api/projects")
+    def list_projects():
+        if project_store is None:
+            return []
+        return [_project_to_dict(p) for p in project_store.list()]
+
+    @app.post("/api/projects")
+    def create_project(name: str, local_path: str = "",
+                       repo_url: str = "", workspace_id: str = "ws-1"):
+        if project_store is None:
+            return {"error": "project store not configured"}
+        project = project_store.create(
+            workspace_id, name, local_path=local_path, repo_url=repo_url)
+        return _project_to_dict(project)
+
     # --- Demo ---
     @app.post("/api/demo/seed")
     def demo_seed():
@@ -2642,6 +2784,8 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         if squad_router is not None:
             squad_router._squads.clear()
             squad_router._activities.clear()
+        if project_store is not None:
+            project_store._projects.clear()
         return {"issues": 0, "tasks": 0, "squads": 0, "autopilots": 0}
 
     return app
@@ -2657,6 +2801,7 @@ def main(data_dir: str = "./workspace") -> int:
     hub = RealtimeHub()
     member_store = MemberStore(data_dir=data_dir)
     ap_store = AutopilotStore(data_dir=data_dir)
+    project_store = ProjectStore(data_dir=data_dir)
     skills_dir = os.path.join("workspace", "skills", "code-review")
     os.makedirs(skills_dir, exist_ok=True)
     skill_md = os.path.join(skills_dir, "SKILL.md")
@@ -2667,7 +2812,8 @@ def main(data_dir: str = "./workspace") -> int:
     scheduler = Scheduler(ap_store, is_, ts, agent_id="agent-1")
     squad_router = SquadRouter(is_, ts)
     daemon = Daemon(is_, ts, ClaudeCliRunner(), runtime_id="rt-1",
-                    session_store=ss, hub=hub, skill_loader=skill_loader)
+                    session_store=ss, hub=hub, skill_loader=skill_loader,
+                    project_store=project_store)
     clis = PathDetector.detect() or ["claude", "codex"]
     runtime = Runtime(id="rt-1", name="local", clis=clis)
     app = create_console_app(
@@ -2679,6 +2825,7 @@ def main(data_dir: str = "./workspace") -> int:
         squad_router=squad_router,
         daemon=daemon,
         runtime=runtime,
+        project_store=project_store,
     )
     print("mica Mission Control → http://localhost:8000/")
     uvicorn.run(app, host="0.0.0.0", port=8000)
