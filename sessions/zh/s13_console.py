@@ -2613,17 +2613,16 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     return app
 
 
-def main(data_dir: str | None = None) -> int:
-    """Wire all in-memory stores + StubRunner + uvicorn on :8000."""
+def main(data_dir: str = "./workspace") -> int:
+    """Wire all stores + ClaudeCliRunner + uvicorn on :8000. Default data_dir=./workspace (JSONL persistence)."""
     import uvicorn
-    if data_dir:
-        os.makedirs(data_dir, exist_ok=True)
-    is_ = IssueStore(data_dir=data_dir) if data_dir else IssueStore()
-    ts = TaskStore(data_dir=data_dir) if data_dir else TaskStore()
-    ss = SessionStore(data_dir or "./workspace")
+    os.makedirs(data_dir, exist_ok=True)
+    is_ = IssueStore(data_dir=data_dir)
+    ts = TaskStore(data_dir=data_dir)
+    ss = SessionStore(data_dir)
     hub = RealtimeHub()
-    member_store = MemberStore(data_dir=data_dir) if data_dir else MemberStore()
-    ap_store = AutopilotStore(data_dir=data_dir) if data_dir else AutopilotStore()
+    member_store = MemberStore(data_dir=data_dir)
+    ap_store = AutopilotStore(data_dir=data_dir)
     skills_dir = os.path.join("workspace", "skills", "code-review")
     os.makedirs(skills_dir, exist_ok=True)
     skill_md = os.path.join(skills_dir, "SKILL.md")
