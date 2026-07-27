@@ -24,6 +24,7 @@ from sessions.zh.s14_console import (
     SquadRouter,
     StubRunner,
     TaskStore,
+    browse_dirs,
     create_console_app,
 )
 
@@ -254,3 +255,110 @@ def test_issue_without_project_has_empty_workdir(tmp_path):
     assert issue["project_id"] == ""
     detail = client.get(f"/api/issues/{issue['id']}").json()
     assert detail["workdir"] == ""
+
+
+def test_list_issues_filtered_by_workspace(tmp_path):
+    """s11:GET /api/issues?workspace_id=... 只返回该 workspace 的 issue。"""
+    client, is_, *_ = _client(tmp_path)
+    is_.create("ws-1", "ws1 issue", assignee_type="agent", assignee_id="agent-1")
+    is_.create("ws-2", "ws2 issue", assignee_type="agent", assignee_id="agent-1")
+    ws1 = client.get("/api/issues", params={"workspace_id": "ws-1"}).json()
+    ws2 = client.get("/api/issues", params={"workspace_id": "ws-2"}).json()
+    assert [i["title"] for i in ws1] == ["ws1 issue"]
+    assert [i["title"] for i in ws2] == ["ws2 issue"]
+
+
+def test_list_issues_member_gate(tmp_path):
+    """s11:alice 不是 ws-2 成员 -> list 返回 error 而非数据。"""
+    client, is_, *_ = _client(tmp_path)
+    is_.create("ws-2", "ws2 issue", assignee_type="agent", assignee_id="agent-1")
+    # alice 是 ws-1 成员,不是 ws-2 成员
+    res = client.get("/api/issues", params={"workspace_id": "ws-2",
+                                            "member_id": "alice"}).json()
+    assert "error" in res
+    assert "not in workspace ws-2" in res["error"]
+
+
+def test_create_issue_member_gate(tmp_path):
+    """s11:非成员在 ws-2 create issue 被拒,返回 error。"""
+    client, *_ = _client(tmp_path)
+    res = client.post(
+        "/api/issues",
+        params={"title": "forbidden", "assignee_type": "agent",
+                "assignee_id": "agent-1", "workspace_id": "ws-2",
+                "member_id": "alice"},
+    ).json()
+    assert "error" in res
+    assert "not in workspace ws-2" in res["error"]
+
+
+def test_list_tasks_filtered_by_workspace(tmp_path):
+    """tasks 视图按 workspace 过滤(task 自身无 workspace_id,经 issue 关联)。"""
+    client, is_, ts, *_ = _client(tmp_path)
+    i1 = is_.create("ws-1", "ws1", assignee_type="agent", assignee_id="agent-1")
+    i2 = is_.create("ws-2", "ws2", assignee_type="agent", assignee_id="agent-1")
+    ts.enqueue(i1.id, "agent", "agent-1")
+    ts.enqueue(i2.id, "agent", "agent-1")
+    ws1 = client.get("/api/tasks", params={"workspace_id": "ws-1"}).json()
+    ws2 = client.get("/api/tasks", params={"workspace_id": "ws-2"}).json()
+    assert len(ws1) == 1 and ws1[0]["issue_id"] == i1.id
+    assert len(ws2) == 1 and ws2[0]["issue_id"] == i2.id
+
+
+def test_member_added_then_can_access_ws2(tmp_path):
+    """端到端:add member 后 gate 放行。"""
+    client, *_ = _client(tmp_path)
+    # alice 不能 list ws-2
+    before = client.get("/api/issues", params={"workspace_id": "ws-2",
+                                               "member_id": "alice"}).json()
+    assert "error" in before
+    # 加入 ws-2
+    client.post("/api/workspaces/ws-2/members", params={"member_id": "alice"})
+    # 现在能 list(空列表,不是 error)
+    after = client.get("/api/issues", params={"workspace_id": "ws-2",
+                                              "member_id": "alice"}).json()
+    assert isinstance(after, list)
+    assert after == []
+
+
+def test_browse_dirs_lists_subdirs(tmp_path):
+    """browse_dirs 只列目录,不含文件。"""
+    (tmp_path / "repo-a").mkdir()
+    (tmp_path / "repo-b").mkdir()
+    (tmp_path / "file.txt").write_text("x")
+    res = browse_dirs(str(tmp_path))
+    assert res["current"] == str(tmp_path)
+    names = [d["name"] for d in res["dirs"]]
+    assert names == ["repo-a", "repo-b"]   # 排序 + 无文件
+
+
+def test_browse_dirs_parent_and_root(tmp_path):
+    """parent 指向上一级;根 / 时 parent 为 None。"""
+    sub = tmp_path / "x"
+    sub.mkdir()
+    res = browse_dirs(str(sub))
+    assert res["parent"] == str(tmp_path)
+    # 根:parent 与 current 相同则归 None
+    root_res = browse_dirs("/")
+    assert root_res["parent"] is None
+    assert root_res["current"] == "/"
+
+
+def test_browse_dirs_missing_path_empty(tmp_path):
+    """不存在的路径 -> 空 dirs,不抛错。"""
+    res = browse_dirs(str(tmp_path / "nope"))
+    assert res["dirs"] == []
+
+
+def test_fs_browse_route(tmp_path):
+    """/api/fs/browse 路由返回目录结构。"""
+    client, *_ = _client(tmp_path)
+    # 在 tmp_path 下造两个子目录,用 client 不易访问 tmp_path;改用 home 默认
+    res = client.get("/api/fs/browse").json()
+    assert "current" in res and "dirs" in res and "parent" in res
+    res2 = client.get("/api/fs/browse", params={"path": "/"}).json()
+    assert res2["current"] == "/"
+    assert res2["parent"] is None
+    assert isinstance(res2["dirs"], list)
+
+

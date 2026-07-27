@@ -2035,6 +2035,38 @@ def _project_to_dict(p: "Project") -> dict:
     }
 
 
+def browse_dirs(path: str | None = None) -> dict:
+    """s14:文件系统目录浏览器(教学用,只读)。
+    不钉死 root:默认从用户家目录起步,可一路向上到 / 再进任意目录,
+    让 project.local_path 能真正指向磁盘上任何真实仓库目录。
+
+    返回 {current, parent, dirs:[{name,path}]};只列目录(不含文件),
+    无权读 / 不存在 / 非目录的路径返回空 dirs 而非抛错。
+
+    注意:此函数暴露服务端文件系统结构。控制台默认绑定 127.0.0.1(本地),
+    若把 host 改成 0.0.0.0 对外暴露,任何能访问端口的人都能浏览你的磁盘目录——
+    教学场景请保持本地绑定。
+    """
+    if not path:
+        path = os.path.expanduser("~")
+    path = os.path.abspath(os.path.expanduser(path))
+    parent = os.path.dirname(path)
+    if parent == path:  # 已到根 /
+        parent = None
+    dirs: list[dict] = []
+    try:
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            try:
+                if os.path.isdir(full):
+                    dirs.append({"name": name, "path": full})
+            except OSError:
+                continue
+    except (PermissionError, FileNotFoundError, NotADirectoryError):
+        pass
+    return {"current": path, "parent": parent, "dirs": dirs}
+
+
 CONSOLE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2147,15 +2179,24 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .roster{font-family:var(--mono);font-size:12px;line-height:2}
   .roster .m{color:var(--info)} .roster .lead{color:var(--accent);font-weight:600}
   .empty{color:var(--muted);font-style:italic;padding:12px 0;text-align:center}
+
+  /* FS browser modal */
+  .modal-bg{display:none;position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:50;align-items:center;justify-content:center}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(680px,92vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.2)}
+  .modal .head{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .modal .head .crumb{font-family:var(--mono);font-size:11px;color:var(--muted);flex:1;word-break:break-all}
+  .modal .body{overflow:auto;padding:8px 12px;flex:1}
+  .modal .fs-item{padding:7px 10px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px;transition:background .12s}
+  .modal .fs-item:hover{background:var(--accent-light);color:var(--accent)}
 </style>
 </head>
 <body>
 <div class="top">
   <span class="brand">◆ mica</span>
-  <select id="ws" title="workspace"></select>
-  <select id="member" title="member"></select>
-  <span class="pill" id="status-pill">ready</span>
-  <span class="pill"><span class="ws-dot" id="ws-dot"></span><span id="ws-state">disconnected</span></span>
+  <select id="ws" title="workspace" onchange="switchWorkspace(this.value)"></select>
+  <select id="member" title="member" onchange="switchMember(this.value)"></select>
+  <span class="pill status-pill">ready</span>
+  <span class="pill"><span class="ws-dot off" id="ws-dot"></span><span id="ws-state">disconnected</span></span>
 </div>
 <div class="mid">
   <div class="nav" id="nav">
@@ -2188,11 +2229,11 @@ CONSOLE_HTML = """<!DOCTYPE html>
   <button class="btn" onclick="seedDemo()">📋 Seed demo</button>
   <button class="btn" onclick="resetDemo()">↺ Reset</button>
   <span style="flex:1"></span>
-  <span class="pill" id="status-pill" style="color:var(--muted)">ready</span>
+  <span class="pill status-pill" style="color:var(--muted)">ready</span>
 </div>
 <script>
 const state = {view:'overview', selType:null, selId:null, ws:'ws-1', member:'alice', wsSocket:null};
-function setStatus(msg, color){const el=document.getElementById('status-pill');el.textContent=msg;el.style.color=color||'var(--muted)';}
+function setStatus(msg, color){document.querySelectorAll('.status-pill').forEach(el=>{el.textContent=msg;el.style.color=color||'var(--muted)';});}
 async function api(path, opts){const r=await fetch(path, opts||{});return r.json();}
 function el(id){return document.getElementById(id);}
 function badge(s){const cls='b-'+s;return '<span class="badge '+cls+'">'+s+'</span>';}
@@ -2222,6 +2263,7 @@ function renderMd(s){
 
 async function loadView(v){
   state.view=v||state.view;
+  closeWatch();
   document.querySelectorAll('.nav .item').forEach(n=>n.classList.toggle('active', n.dataset.v===state.view));
   const list=el('list'); const title=el('list-title');
   title.textContent=state.view.charAt(0).toUpperCase()+state.view.slice(1);
@@ -2240,13 +2282,14 @@ async function loadView(v){
     feed+='</div>';
     list.innerHTML=cards+feed;
   } else if(state.view==='issues'){
-    const d=await api('/api/issues');
+    const d=await api('/api/issues?workspace_id='+encodeURIComponent(state.ws)+'&member_id='+encodeURIComponent(state.member));
+    if(d && d.error){list.innerHTML='<p class="empty" style="color:var(--err)">⛔ '+esc(d.error)+'</p>';return;}
     const projs=await api('/api/projects');
     let projOpts='<option value="">no project</option>';
     (projs||[]).forEach(p=>{projOpts+='<option value="'+p.id+'">'+esc(p.name)+' ('+short(p.id)+')</option>';});
     list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><select name="project_id" title="project (optional)">'+projOpts+'</select><button class="btn primary">+ New</button></form>'+issuesTable(d);
   } else if(state.view==='tasks'){
-    const d=await api('/api/tasks');
+    const d=await api('/api/tasks?workspace_id='+encodeURIComponent(state.ws));
     list.innerHTML=tasksTable(d)+'<p style="margin-top:8px"><button class="btn" onclick="runDaemonOnce()">▶ Run daemon once</button></p>';
   } else if(state.view==='trace'){
     list.innerHTML='<p class="empty">select a task from Tasks view</p>';
@@ -2285,7 +2328,7 @@ async function loadView(v){
     list.innerHTML=h||'<p class="empty">no squads</p>';
   } else if(state.view==='projects'){
     const d=await api('/api/projects');
-    let h='<form class="inline" onsubmit="createProject(event)"><input name="name" placeholder="project name" required><input name="local_path" placeholder="/path/to/repo (optional)"><input name="repo_url" placeholder="git url (optional)"><button class="btn primary">+ New</button></form>';
+    let h='<form class="inline" onsubmit="createProject(event)"><input name="name" placeholder="project name" required><input name="local_path" id="proj-local-path" placeholder="/path/to/repo (optional)" style="min-width:240px"><button type="button" class="btn" onclick="browseOpen()" title="选择目录">📁</button><input name="repo_url" placeholder="git url (optional)"><button class="btn primary">+ New</button></form>';
     h+='<div class="list-row head" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>ID</span><span>Name</span><span>Local Path</span><span>Repo</span><span></span></div>';
     (d||[]).forEach(p=>{h+='<div class="list-row" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>'+short(p.id)+'</span><span>'+esc(p.name)+'</span><span style="font-size:11px">'+esc(p.local_path||'-')+'</span><span style="font-size:11px">'+esc(p.repo_url||'-')+'</span><span></span></div>';});
     list.innerHTML=h||'<p class="empty">no projects</p>';
@@ -2321,7 +2364,7 @@ async function selectObject(type, id){
     h+='<h3 style="color:var(--accent);margin-bottom:6px;font-size:18px">'+data.title+'</h3>';
     h+='<div style="margin-bottom:8px">'+badge(data.status)+' <span style="color:var(--muted);font-family:var(--mono);font-size:11px;margin-left:8px">'+(data.assignee_type||'-')+':'+(data.assignee_id||'-')+'</span></div>';
     if(data.workdir) h+='<div style="margin-bottom:8px;font-size:12px;color:var(--muted);font-family:var(--mono)">📁 Workdir: '+esc(data.workdir)+'</div>';
-    if(data.body) h+='<div style="color:var(--muted);font-size:13px;margin-bottom:12px;line-height:1.6">'+data.body+'</div>';
+    if(data.body) h+='<div style="color:var(--muted);font-size:13px;margin-bottom:12px;line-height:1.6">'+renderMd(data.body)+'</div>';
     // 状态转移按钮
     h+='<div style="margin:12px 0">';
     var st=data.status;
@@ -2343,7 +2386,7 @@ async function selectObject(type, id){
       let cls = isAgent ? 'var(--accent)' : 'var(--info)';
       let bg = isAgent ? 'var(--accent-light)' : 'var(--surface)';
       let label = isAgent ? '🤖 Agent' : '👤 Comment';
-      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 14px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'"><div style="font-size:10px;color:'+cls+';font-weight:600;margin-bottom:2px">'+label+'</div>'+renderMd(c)+'</div>';
+      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 14px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'"><div style="font-size:10px;color:'+cls+';font-weight:600;margin-bottom:2px">'+label+'</div>'+renderMd(c.replace(/^\\[agent[^\\]]*\\]\\s*/, ''))+'</div>';
     });
     if(!(data.comments||[]).length && !(data.tasks||[]).length) h+='<p class="empty">no activity yet</p>';
     // 评论表单(底部)
@@ -2353,6 +2396,7 @@ async function selectObject(type, id){
     h+='</form>';
     el('list').innerHTML=h;
     el('list-title').textContent='Issue Detail';
+    watchIssue(id);
   } else {
     // 非 issue 对象:Inspector 显示 JSON
     el('ins-json').textContent=JSON.stringify(data, null, 2);
@@ -2387,27 +2431,75 @@ function renderTimeline(issue){
 }
 function renderTrace(issue){el('tl-panel').querySelector('h2').textContent='Lifecycle — '+short(issue.id);}
 
-async function createIssue(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1',project_id:f.get('project_id')||''}),{method:'POST'});loadView();}
+async function createIssue(e){e.preventDefault();const f=new FormData(e.target);try{const r=await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1',project_id:f.get('project_id')||'',workspace_id:state.ws,member_id:state.member}),{method:'POST'});const d=await r.json();if(d&&d.error){setStatus('create failed: '+d.error,'var(--err)');return;}loadView();}catch(err){setStatus('create failed: '+err.message,'var(--err)');}}
 async function createProject(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/projects?'+new URLSearchParams({name:f.get('name'),local_path:f.get('local_path')||'',repo_url:f.get('repo_url')||''}),{method:'POST'});loadView();}
 async function createAutopilot(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/autopilots?'+new URLSearchParams({cron:f.get('cron'),agent_id:f.get('agent_id'),title:f.get('title')}),{method:'POST'});loadView();}
 async function createSquad(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/squads?'+new URLSearchParams({name:f.get('name'),leader_agent_id:f.get('leader_agent_id'),member_agent_ids:f.get('member_agent_ids')}),{method:'POST'});loadView();}
 async function previewSkill(e){e.preventDefault();const f=new FormData(e.target);const d=await fetch('/api/skills/preview?'+new URLSearchParams({title:f.get('title')||'',body:f.get('body')||''}),{method:'POST'}).then(r=>r.json());alert('Matched: '+(d.matched?d.matched.name:'none')+'\\n\\n'+(d.injected_prompt||''));}
 async function addMember(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/workspaces/'+state.ws+'/members?member_id='+encodeURIComponent(f.get('member_id')),{method:'POST'});loadView();}
 async function addComment(e,id){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues/'+id+'/comments?text='+encodeURIComponent(f.get('text')||''),{method:'POST'});selectObject('issue',id);}
-async function transitionIssue(id,status){try{await fetch('/api/issues/'+id+'/status?status='+status,{method:'PATCH'});selectObject('issue',id);loadView();}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function transitionIssue(id,status){try{await fetch('/api/issues/'+id+'/status?status='+status,{method:'PATCH'});loadView();selectObject('issue',id);}catch(e){setStatus('error: '+e.message,'var(--err)');}}
 async function runDaemonOnce(){try{setStatus('running daemon...','var(--info)');const d=await api('/api/daemon/run-once',{method:'POST'});setStatus('daemon ran: '+d.run+' task(s)','var(--ok)');if(state.selType==='issue'&&state.selId){selectObject('issue',state.selId);}else{loadView();}}catch(e){setStatus('error: '+e.message,'var(--err)');}}
 async function autopilotTick(){const d=await api('/api/autopilots/tick',{method:'POST'});setStatus('autopilot tick: '+d.triggered,'var(--ok)');loadView();}
 async function seedDemo(){const d=await api('/api/demo/seed',{method:'POST'});setStatus('seeded: '+d.issues+' issues','var(--ok)');loadView();}
 async function resetDemo(){const d=await api('/api/demo/reset',{method:'POST'});setStatus('reset','var(--warn)');loadView();}
-function watchIssue(id){if(state.wsSocket) state.wsSocket.close();state.wsSocket=new WebSocket('ws://'+location.host+'/ws/issues/'+id);state.wsSocket.onopen=()=>{el('ws-dot').classList.remove('off');el('ws-state').textContent='connected';};state.wsSocket.onclose=()=>{el('ws-dot').classList.add('off');el('ws-state').textContent='disconnected';};state.wsSocket.onmessage=(e)=>{el('detail').innerHTML+='<div style="color:var(--info)">'+e.data+'</div>';};}
-function switchWorkspace(w){state.ws=w;loadView();}
-function switchMember(m){state.member=m;}
+function watchIssue(id){
+  if(state.wsSocket && state.wsIssueId===id) return;
+  if(state.wsSocket){state.wsSocket.close();state.wsSocket=null;}
+  state.wsIssueId=id;
+  try{state.wsSocket=new WebSocket('ws://'+location.host+'/ws/issues/'+id);}
+  catch(e){el('ws-state').textContent='ws unavailable';return;}
+  state.wsSocket.onopen=()=>{el('ws-dot').classList.remove('off');el('ws-state').textContent='connected';};
+  state.wsSocket.onclose=()=>{el('ws-dot').classList.add('off');el('ws-state').textContent='disconnected';};
+  state.wsSocket.onmessage=(e)=>{
+    let type='event';try{const j=JSON.parse(e.data);type=j.type||'event';}catch(_){}
+    setStatus('live: '+type,'var(--info)');
+    const a=document.activeElement;
+    if(a&&a.name==='text') return;
+    if(state.selType==='issue'&&state.selId===id) selectObject('issue',id);
+  };
+}
+function closeWatch(){if(state.wsSocket){state.wsSocket.close();state.wsSocket=null;state.wsIssueId=null;}el('ws-dot').classList.add('off');el('ws-state').textContent='disconnected';}
+// --- 本地目录浏览器(project.local_path 选填)---
+let fsCurrent='';
+async function browseOpen(){
+  el('fs-modal').style.display='flex';
+  if(!state.fsBound){el('fs-body').addEventListener('click',function(e){var it=e.target.closest('.fs-item');if(it)browseNav(it.dataset.path);});state.fsBound=true;}
+  await browseNav('');
+}
+async function browseNav(path){
+  const d=await api('/api/fs/browse'+(path?('?path='+encodeURIComponent(path)):''));
+  fsCurrent=d.current||'';
+  el('fs-crumb').textContent=fsCurrent;
+  let h='';
+  if(!d.dirs||!d.dirs.length) h+='<p class="empty">无子目录(或无权访问)</p>';
+  (d.dirs||[]).forEach(function(x){h+='<div class="fs-item" data-path="'+esc(x.path)+'">📁 '+esc(x.name)+'</div>';});
+  el('fs-body').innerHTML=h;
+}
+function browseNavParent(){if(fsCurrent&&fsCurrent!=='/'){var p=fsCurrent.replace(/\\/[^\\/]+$/,'')||'/';browseNav(p);}}
+function browseSelectCurrent(){var i=el('proj-local-path');if(i&&fsCurrent)i.value=fsCurrent;browseClose();}
+function browseClose(){el('fs-modal').style.display='none';}
+function switchWorkspace(w){state.ws=w;setStatus('workspace: '+w,'var(--info)');loadView();}
+function switchMember(m){state.member=m;setStatus('viewing as '+m,'var(--info)');loadView();}
 document.querySelectorAll('.nav .item').forEach(n=>n.addEventListener('click',()=>loadView(n.dataset.v)));
 // Populate dropdowns
-  fetch('/api/workspaces').then(r=>r.json()).then(d=>{const sel=el('ws');sel.innerHTML='';(d||[]).forEach(w=>{const o=document.createElement('option');o.value=w.id;o.text=w.slug+' ('+w.id+')';sel.appendChild(o);});});
+  fetch('/api/workspaces').then(r=>r.json()).then(d=>{const sel=el('ws');sel.innerHTML='';(d||[]).forEach(w=>{const o=document.createElement('option');o.value=w.id;o.text=w.slug+' ('+w.id+')';sel.appendChild(o);});sel.value=state.ws;});
   el('member').innerHTML='<option value="alice">alice</option><option value="bob">bob</option>';
+  el('member').value=state.member;
   loadView('overview');
 </script>
+<div class="modal-bg" id="fs-modal">
+  <div class="modal">
+    <div class="head">
+      <b style="font-size:13px">选择目录</b>
+      <span class="crumb" id="fs-crumb"></span>
+      <button class="btn" onclick="browseNavParent()">↑ 上级</button>
+      <button class="btn primary" onclick="browseSelectCurrent()">✓ 选择此目录</button>
+      <button class="btn" onclick="browseClose()">✕</button>
+    </div>
+    <div class="body" id="fs-body"><p class="empty">loading...</p></div>
+  </div>
+</div>
 </body>
 </html>
 """
@@ -2437,8 +2529,11 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             _agents.append(Agent(id=aid, name=name, cli=cli, runtime_id=runtime.id))
 
     # --- 内部 workspaces 注册表(教学用,内存)---
+    # ws-2 故意不带成员,用于演示 s11 成员闸门:切到 ws-2 后非成员 list/create 被拒,
+    # 需在 Workspaces 视图 add member 后才能访问。
     _workspaces: dict[str, Workspace] = {
         "ws-1": Workspace(id="ws-1", slug="default", name="Default"),
+        "ws-2": Workspace(id="ws-2", slug="team-b", name="Team B"),
     }
     if member_store is not None:
         for m in ["alice", "bob"]:
@@ -2480,9 +2575,14 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
 
     # --- Issues ---
     @app.get("/api/issues")
-    def list_issues():
+    def list_issues(workspace_id: str | None = None,
+                    member_id: str | None = None):
+        try:
+            issues = issue_store.list(workspace_id, member_id, member_store)
+        except PermissionError as e:
+            return {"error": str(e)}
         out = []
-        for i in issue_store.list():
+        for i in issues:
             d = _issue_to_dict(i)
             d["child_count"] = len(issue_store.children(i.id))
             d["task_count"] = len(task_store.list(i.id))
@@ -2496,11 +2596,17 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     def create_issue(title: str = "", assignee_type: str = "agent",
                      assignee_id: str = "", body: str = "",
                      workspace_id: str = "ws-1",
-                     project_id: str = ""):
-        issue = issue_store.create(
-            workspace_id, title or "(untitled)", body=body,
-            assignee_type=assignee_type, assignee_id=assignee_id,
-            project_id=project_id)
+                     project_id: str = "",
+                     member_id: str = ""):
+        try:
+            issue = issue_store.create(
+                workspace_id, title or "(untitled)", body=body,
+                assignee_type=assignee_type, assignee_id=assignee_id,
+                project_id=project_id,
+                member_id=member_id or None,
+                member_store=member_store)
+        except PermissionError as e:
+            return {"error": str(e)}
         if assignee_type == "agent" and assignee_id:
             task_store.enqueue(issue.id, assignee_type, assignee_id)
         elif assignee_type == "squad" and assignee_id and squad_router:
@@ -2550,10 +2656,15 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
 
     # --- Tasks ---
     @app.get("/api/tasks")
-    def list_tasks(status: str | None = None):
+    def list_tasks(status: str | None = None,
+                   workspace_id: str | None = None):
         tasks = task_store.list()
         if status:
             tasks = [t for t in tasks if t.status.value == status]
+        if workspace_id:
+            tasks = [t for t in tasks
+                     if (issue_store.get(t.issue_id)
+                         and issue_store.get(t.issue_id).workspace_id == workspace_id)]
         return [_task_to_dict(t) for t in tasks]
 
     @app.post("/api/daemon/run-once")
@@ -2735,6 +2846,11 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             workspace_id, name, local_path=local_path, repo_url=repo_url)
         return _project_to_dict(project)
 
+    # --- FS browser (本地目录选择器,供 project.local_path 选填)---
+    @app.get("/api/fs/browse")
+    def fs_browse(path: str | None = None):
+        return browse_dirs(path)
+
     # --- Demo ---
     @app.post("/api/demo/seed")
     def demo_seed():
@@ -2828,7 +2944,9 @@ def main(data_dir: str = "./workspace") -> int:
         project_store=project_store,
     )
     print("mica Mission Control → http://localhost:8000/")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 绑定 127.0.0.1(本地):控制台含 /api/fs/browse 会暴露服务端目录结构,
+    # 对外开放端口会让任何人浏览你的磁盘。教学场景保持本地绑定。
+    uvicorn.run(app, host="127.0.0.1", port=8000)
     return 0
 
 
