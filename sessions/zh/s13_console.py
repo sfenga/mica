@@ -2091,6 +2091,28 @@ async function api(path, opts){const r=await fetch(path, opts||{});return r.json
 function el(id){return document.getElementById(id);}
 function badge(s){const cls='b-'+s;return '<span class="badge '+cls+'">'+s+'</span>';}
 function short(id){return id?id.slice(0,8):'-';}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function renderMd(s){
+  s=esc(s);
+  s=s.split("\\n\\n");
+  s=s.map(function(p){
+    p=p.trim();
+    p=p.replace(/```([^]*?)```/g,function(m,c){return "<pre style='background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px;margin:6px 0;overflow-x:auto;font-size:11px'><code>"+c.trim()+"</code></pre>"});
+    p=p.replace(/`([^`]+)`/g,"<code style='background:var(--surface2);padding:1px 4px;border-radius:4px;font-size:11px'>$1</code>");
+    p=p.replace(/^### (.+)$/,"<h4 style='margin:8px 0 4px;color:var(--text)'>$1</h4>");
+    p=p.replace(/^## (.+)$/,"<h3 style='margin:10px 0 4px;color:var(--text)'>$1</h3>");
+    p=p.replace(/^# (.+)$/,"<h2 style='margin:12px 0 4px;color:var(--text)'>$1</h2>");
+    p=p.replace(/[*][*](.+?)[*][*]/g,"<strong>$1</strong>");
+    p=p.replace(/[*](.+?)[*]/g,"<em>$1</em>");
+    p=p.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g,"<a href='$2' target='_blank' style='color:var(--accent)'>$1</a>");
+    p=p.replace(/^> (.+)$/,"<blockquote style='border-left:3px solid var(--accent);margin:6px 0;padding:4px 12px;color:var(--muted)'>$1</blockquote>");
+    p=p.replace(/^[-*] (.+)$/,"<li style='margin:2px 0 2px 16px;list-style:disc'>$1</li>");
+    p=p.replace(/^[0-9]+[.] (.+)$/,"<li style='margin:2px 0 2px 16px;list-style:decimal'>$1</li>");
+    p=p.replace(/\\n/g,"<br>");
+    return p;
+  }).join("</p><p style='margin:6px 0;line-height:1.6'>");
+  return "<p style='margin:6px 0;line-height:1.6'>"+s+"</p>";
+}
 
 async function loadView(v){
   state.view=v||state.view;
@@ -2205,7 +2227,7 @@ async function selectObject(type, id){
       let cls = isAgent ? 'var(--accent)' : 'var(--info)';
       let bg = isAgent ? 'var(--accent-light)' : 'var(--surface)';
       let label = isAgent ? '🤖 Agent' : '👤 Comment';
-      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 14px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'"><div style="font-size:10px;color:'+cls+';font-weight:600;margin-bottom:2px">'+label+'</div>'+c+'</div>';
+      h+='<div style="background:'+bg+';border-radius:8px;padding:8px 14px;margin-bottom:6px;font-size:12px;border-left:3px solid '+cls+'"><div style="font-size:10px;color:'+cls+';font-weight:600;margin-bottom:2px">'+label+'</div>'+renderMd(c)+'</div>';
     });
     if(!(data.comments||[]).length && !(data.tasks||[]).length) h+='<p class="empty">no activity yet</p>';
     // 评论表单(底部)
