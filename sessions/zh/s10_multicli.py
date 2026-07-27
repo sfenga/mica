@@ -1,14 +1,13 @@
-"""s10 — multi-CLI PATH detection + 1:N daemon (runtime_id)
+"""s10 — multi-CLI PATH detection + runtime-scoped 1:N daemon
 
 在 s09(cron autopilot)之上叠加:
 - PathDetector:用 shutil.which 探测 PATH 上可用的 agent CLI(已知 CLI 白名单)。
 - Runtime dataclass:持有 id/name/clis(本进程可用的 CLI 列表)。
-- MultiCliRunner:按 cli 名注册 runner 的简单注册表(未来多 CLI 分派的建筑块;s10
-  的 daemon 仍用单 runner,MultiCliRunner 不被 daemon 实际调用)。
-- Daemon 1:N:claim_next 不再按 agent_id 过滤,而是认领所有 assignee_type=="agent"
-  的 queued task(本 daemon 托管本 runtime 上所有 agent)。runtime_id 标识 daemon,
-  不在 task 上过滤(task 无 runtime_id 字段)。s02 的 1:1 模式由 s02 自己的模块保留。
-- main():PathDetector 探测 CLI + 1:N daemon 认领两个不同 agent 的 task。
+- MultiCliRunner:按 cli 名注册 runner,Daemon.execute 可按 agent.cli 分派。
+- Task.runtime_id:task 明确绑定 runtime;Daemon.claim_next 只认领本 runtime 的 task。
+- Daemon 1:N:同一 runtime daemon 托管多个 agent,但不会抢其它 runtime 的 task。
+- fail-closed:未知 agent 或未注册 cli runner 会把 task 标成 failed,不会静默落到默认 runner。
+- main():PathDetector 探测 CLI + runtime-scoped 1:N daemon 执行两个 agent task。
 """
 import asyncio
 import glob
@@ -62,8 +61,7 @@ class Runtime:
 
 
 class MultiCliRunner:
-    """按 cli 名注册 runner 的简单注册表(s10 的 daemon 不实际调用它,
-    它是未来多 CLI 分派的建筑块)。"""
+    """按 cli 名注册 runner;Daemon 可据 agent.cli 选择具体 runner。"""
     def __init__(self):
         self._runners: dict = {}   # cli_name -> runner
 
@@ -72,6 +70,20 @@ class MultiCliRunner:
 
     def has(self, cli: str) -> bool:
         return cli in self._runners
+
+    def get(self, cli: str):
+        return self._runners.get(cli)
+
+    def run(self, cli: str, task, issue, context, on_event,
+            resume_session_id: str | None = None,
+            append_system_prompt: str | None = None) -> "RunResult":
+        runner = self.get(cli)
+        if runner is None:
+            return {"status": "failed", "output": f"runner not registered for cli: {cli}",
+                    "exit_code": 127, "session_id": ""}
+        return runner.run(task, issue, context, on_event,
+                          resume_session_id=resume_session_id,
+                          append_system_prompt=append_system_prompt)
 
     def available(self) -> list[str]:
         return list(self._runners.keys())
@@ -361,8 +373,10 @@ class IssueStore:
             issue = self._require(issue_id)
             tasks = task_store.list(issue_id)
             source_task_id = tasks[-1].id if tasks else ""
+            runtime_id = tasks[-1].runtime_id if tasks else ""
             return task_store.enqueue(issue_id, issue.assignee_type, issue.assignee_id,
-                                      rerun_of_task_id=source_task_id)
+                                      rerun_of_task_id=source_task_id,
+                                      runtime_id=runtime_id)
 
     def _require(self, issue_id: str) -> Issue:
         issue = self._issues.get(issue_id)
@@ -378,8 +392,11 @@ def comment_and_enqueue(issue_store: IssueStore, task_store: "TaskStore",
                         issue_id: str, text: str) -> "Task":
     """评论 + 为 issue assignee 入队新 queued task。issue 状态不变。"""
     issue = issue_store.comment(issue_id, text)
+    tasks = task_store.list(issue_id)
+    runtime_id = tasks[-1].runtime_id if tasks else ""
     return task_store.enqueue(issue_id, issue.assignee_type, issue.assignee_id,
-                              trigger_comment_id=text)
+                              trigger_comment_id=text,
+                              runtime_id=runtime_id)
 
 
 def render_board(issues: list[Issue]) -> str:
@@ -459,6 +476,7 @@ class Task:
     issue_id: str
     assignee_type: str = ""        # "agent" | "member"
     assignee_id: str = ""
+    runtime_id: str = ""           # s10:该 task 绑定到哪个 runtime;空串兼容旧数据
     status: TaskStatus = TaskStatus.QUEUED
     session_id: str = ""
     trigger_comment_id: str = ""
@@ -485,6 +503,7 @@ def _task_from_dict(d: dict) -> Task:
         issue_id=d["issue_id"],
         assignee_type=d.get("assignee_type", ""),
         assignee_id=d.get("assignee_id", ""),
+        runtime_id=d.get("runtime_id", ""),
         status=TaskStatus(d["status"]),
         session_id=d.get("session_id", ""),
         trigger_comment_id=d.get("trigger_comment_id", ""),
@@ -545,13 +564,15 @@ class TaskStore:
         return n
 
     def enqueue(self, issue_id: str, assignee_type: str, assignee_id: str,
-                trigger_comment_id: str = "", rerun_of_task_id: str = "") -> Task:
+                trigger_comment_id: str = "", rerun_of_task_id: str = "",
+                runtime_id: str = "") -> Task:
         with self._lock:
             task = Task(
                 id=str(uuid.uuid4()),
                 issue_id=issue_id,
                 assignee_type=assignee_type,
                 assignee_id=assignee_id,
+                runtime_id=runtime_id,
                 trigger_comment_id=trigger_comment_id,
                 rerun_of_task_id=rerun_of_task_id,
             )
@@ -659,25 +680,70 @@ class FailingStubRunner:
 # ===========================================================================
 class Daemon:
     def __init__(self, issue_store: IssueStore, task_store: TaskStore,
-                 runner: AgentRunner,
-                 runtime_id: str = "local",
+                 runner: AgentRunner | Agent,
+                 runtime_id: str | AgentRunner = "local",
                  agent_id: str | None = None,
                  poll_interval: float = 2.0,
                  session_store: "SessionStore | None" = None,
                  hub: "RealtimeHub | None" = None,
-                 skill_loader: "SkillLoader | None" = None) -> None:
+                 skill_loader: "SkillLoader | None" = None,
+                 agents: "list[Agent] | dict[str, Agent] | None" = None,
+                 multi_runner: "MultiCliRunner | None" = None) -> None:
+        # 兼容旧章节形态:Daemon(issue_store, task_store, Agent(...), Runner(...))。
+        # s10 推荐形态:Daemon(..., StubRunner(), runtime_id="rt-1",
+        #                      agents=[...], multi_runner=MultiCliRunner())。
+        default_agent: Agent | None = runner if isinstance(runner, Agent) else None
+        if default_agent is not None:
+            actual_runner = runtime_id
+            runtime_id = default_agent.runtime_id
+            agent_id = agent_id or default_agent.id
+        else:
+            actual_runner = runner
+
+        if isinstance(actual_runner, Agent):
+            raise TypeError("runner must be an AgentRunner, not Agent")
+
         # s10:1:N daemon。runtime_id 标识本 daemon(托管本 runtime 上所有 agent);
-        # agent_id 仅为兼容 s02 的 1:1 模式保留,claim_next 不再按它过滤。
+        # task.runtime_id/agent.runtime_id 决定该 daemon 能否 claim。
         self.issue_store = issue_store
         self.task_store = task_store
-        self.runner = runner
-        self.runtime_id = runtime_id
+        self.runner = actual_runner
+        self.runtime_id = str(runtime_id)
         self.agent_id = agent_id
         self.poll_interval = poll_interval
         self.session_store = session_store
         self.hub = hub
         self.skill_loader = skill_loader
+        self.multi_runner = multi_runner
+        self.agents = self._normalize_agents(agents)
+        if default_agent is not None:
+            self.agents.setdefault(default_agent.id, default_agent)
         self._stop = False
+
+    def _normalize_agents(self, agents) -> dict[str, Agent]:
+        if agents is None:
+            return {}
+        if isinstance(agents, dict):
+            return dict(agents)
+        return {agent.id: agent for agent in agents}
+
+    def _resolve_agent(self, task: Task) -> Agent | None:
+        agent = self.agents.get(task.assignee_id)
+        if agent is not None:
+            return agent
+        if self.multi_runner is not None:
+            return None
+        # 兼容旧数据/旧测试:没有 agent registry 时按 task 生成默认 agent。
+        return Agent(id=task.assignee_id, name=task.assignee_id,
+                     runtime_id=task.runtime_id or self.runtime_id)
+
+    def _task_belongs_to_runtime(self, task: Task) -> bool:
+        if task.runtime_id:
+            return task.runtime_id == self.runtime_id
+        agent = self.agents.get(task.assignee_id)
+        if agent is not None:
+            return agent.runtime_id == self.runtime_id
+        return True   # 旧 task 无 runtime_id 时保持兼容
 
     def _record(self, task_id: str, event: dict) -> None:
         if self.session_store is not None:
@@ -693,12 +759,16 @@ class Daemon:
                 self.hub.publish(issue_id, event)
 
     def claim_next(self) -> Task | None:
-        """s10 1:N:认领所有 assignee_type=="agent" 且 queued 的 task
-        (本 daemon 托管本 runtime 上所有 agent,不再按 agent_id 过滤)。"""
+        """s10 1:N:只认领本 runtime 上 queued 的 agent task。
+
+        优先使用 task.runtime_id;旧 task 没有 runtime_id 时,若有 agent registry 则
+        用 agent.runtime_id 判断;仍缺上下文时保持旧章节兼容,允许本 daemon claim。
+        """
         candidates = [
             t for t in self.task_store.list()
             if t.assignee_type == "agent"
             and t.status == TaskStatus.QUEUED
+            and self._task_belongs_to_runtime(t)
         ]
         for task in candidates:
             if self.task_store.claim(task.id):   # CAS
@@ -721,6 +791,11 @@ class Daemon:
 
     def execute(self, task: Task) -> RunResult:
         issue = self.issue_store.get(task.issue_id)
+        if issue is None:
+            result: RunResult = {"status": "failed", "output": f"issue not found: {task.issue_id}",
+                                 "exit_code": 1, "session_id": ""}
+            self.task_store.fail(task.id, result["output"], "")
+            return result
         # 查同 (issue, agent) 上一 task 的 session_id
         prior_sid = self._find_prior_session_id(task)
         task.prior_session_id = prior_sid   # 记录用于审计
@@ -739,9 +814,18 @@ class Daemon:
         skill = None
         if self.skill_loader:
             skill = self.skill_loader.select(issue)
-        result = self.runner.run(task, issue, [], on_event,
-                                 resume_session_id=prior_sid or None,
-                                 append_system_prompt=skill.body if skill else None)
+        agent = self._resolve_agent(task)
+        if agent is None:
+            result = {"status": "failed", "output": f"unknown agent: {task.assignee_id}",
+                      "exit_code": 1, "session_id": ""}
+        elif self.multi_runner is not None:
+            result = self.multi_runner.run(agent.cli, task, issue, [], on_event,
+                                           resume_session_id=prior_sid or None,
+                                           append_system_prompt=skill.body if skill else None)
+        else:
+            result = self.runner.run(task, issue, [], on_event,
+                                     resume_session_id=prior_sid or None,
+                                     append_system_prompt=skill.body if skill else None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
             self.task_store.set_session_id(task.id, result["session_id"])
@@ -1366,16 +1450,24 @@ def main(data_dir: str = "./workspace") -> int:
     clis = PathDetector.detect()
     print(f"detected CLIs: {clis}")
     runtime = Runtime(id="rt-1", name="local", clis=clis)
-    # 1:N daemon(认领本 runtime 上所有 agent 的 task)
+    agents = [
+        Agent(id="agent-1", name="Claude agent", cli="claude", runtime_id=runtime.id),
+        Agent(id="agent-2", name="Codex agent", cli="codex", runtime_id=runtime.id),
+    ]
+    runners = MultiCliRunner()
+    runners.register("claude", StubRunner())
+    runners.register("codex", StubRunner())
+    # runtime-scoped 1:N daemon:认领本 runtime task,按 agent.cli 分派 runner。
     daemon = Daemon(issue_store, task_store, StubRunner(),
-                    session_store=sessions, hub=hub, runtime_id=runtime.id)
+                    session_store=sessions, hub=hub, runtime_id=runtime.id,
+                    agents=agents, multi_runner=runners)
     # 两个 agent 各一条 task
     issue1 = issue_store.create("ws-1", "fix bug", assignee_type="agent",
                                 assignee_id="agent-1")
-    task_store.enqueue(issue1.id, "agent", "agent-1")
+    task_store.enqueue(issue1.id, "agent", "agent-1", runtime_id=runtime.id)
     issue2 = issue_store.create("ws-1", "review PR", assignee_type="agent",
                                 assignee_id="agent-2")
-    task_store.enqueue(issue2.id, "agent", "agent-2")
+    task_store.enqueue(issue2.id, "agent", "agent-2", runtime_id=runtime.id)
     daemon.run_once()   # 两个 task 都被认领并执行
     print(render_board(issue_store.list()))
     return 0

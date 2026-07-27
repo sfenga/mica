@@ -1,115 +1,283 @@
-# s06 — WebSocket 实时进度(RealtimeHub + WS server + task watch)
+# s06 — WebSocket 实时进度
 
-s05 让评论能续聊了,但 daemon 执行 task 时用户看不到过程——只能等 task 完成后看结果。s06 加上实时推送:daemon 执行时,每个事件(claim/progress/done/result)经 `RealtimeHub` 推给所有 WebSocket 订阅者;终端 `task watch <id>` 连 WS 实时看进度。晚到的订阅者不回放历史——历史走 s04 的 `sessions/<task_id>.jsonl`。
+s05 已经能把「评论」变成新的 task,并用上一条 task 的 `session_id` 续会话。到这里,后台执行闭环已经成立:
 
-## 一、核心设计思想
+```text
+issue -> task -> daemon 认领 -> runner 执行 -> SessionStore 落盘
+```
 
-第一个思想:**RealtimeHub 是纯 Python pub/sub,不依赖 WS**。一个 `id→订阅者集合` 的字典,`publish(id, event)` 遍历当前订阅者往它们的 `queue.Queue` 里 put 事件:
+但用户体验还有一个断点:daemon 正在执行时,外部看不到过程。只能等 task 结束后,再去读 `sessions/<task_id>.jsonl`。这对 coding agent 很别扭,因为真正有价值的信息往往在执行中出现:模型输出、工具调用、失败提示、完成结果。
+
+s06 只补这一层:**把 daemon 执行中的事件实时推给订阅者**。
+
+本章新增三个东西:
+
+```text
+RealtimeHub       纯 Python 发布/订阅中心
+WS server         把 Hub 事件转成 WebSocket 消息
+task watch        一个终端客户端,连 WS 实时打印事件
+```
+
+注意,本章不改变 issue/task 模型,也不改变 runner 语义。task 怎么认领、怎么落盘、怎么失败,都沿用 s05。s06 只是在 `on_event` 旁边多接一根实时推送的线。
+
+## 1. 先看事件原来在哪里
+
+daemon 执行 task 时,runner 会不断调用 `on_event(ev)`:
+
+```python
+def on_event(ev: dict) -> None:
+    print(f"[event] {ev}")
+    daemon._record(task.id, ev)
+    daemon._publish(task.id, ev)
+```
+
+这里有三件事:
+
+```text
+print             给当前进程看
+_record           写入 s04 的 SessionStore,作为历史
+_publish          本章新增,推给实时订阅者
+```
+
+所以 s06 的位置非常明确:它不负责产生事件,事件仍由 `StubRunner` 或 `ClaudeCliRunner` 产生;它也不负责保存历史,历史仍由 `SessionStore` 保存。它只负责把已经产生的事件立刻送出去。
+
+## 2. 整体链路
+
+完整链路是这样:
+
+```text
+runner 产生事件
+   |
+   v
+Daemon.on_event(ev)
+   |
+   |-- SessionStore.append(task_id, ev)       历史路径
+   |
+   `-- RealtimeHub.publish(task_id, ev)       实时路径
+          |
+          v
+      每个订阅 task_id 的 Queue 收到 ev
+          |
+          v
+      WebSocket handler 从 Queue 取出 ev
+          |
+          v
+      websocket.send(json.dumps(ev))
+          |
+          v
+      task watch <id> 实时打印
+```
+
+这里最重要的分工是:
+
+```text
+历史 = JSONL
+实时 = WebSocket
+```
+
+晚到的订阅者不会收到旧事件。旧事件已经在 `sessions/<task_id>.jsonl` 里,需要历史时读文件;WebSocket 只关心连接之后的新事件。
+
+## 3. RealtimeHub: 同步世界里的 pub/sub
+
+`RealtimeHub` 是本章核心,但它很小:
 
 ```python
 class RealtimeHub:
     def __init__(self):
-        self._subs: dict[str, set] = {}   # id -> set of Queue
+        self._subs: dict[str, set] = {}
         self._lock = threading.Lock()
 
-    def subscribe(self, key: str) -> queue.Queue:
+    def subscribe(self, key: str) -> "queue.Queue":
         q = queue.Queue()
         with self._lock:
             self._subs.setdefault(key, set()).add(q)
         return q
 
-    def publish(self, key: str, event: dict):
+    def publish(self, key: str, event: dict) -> None:
         with self._lock:
             subs = list(self._subs.get(key, set()))
         for q in subs:
             q.put(event)
 ```
 
-用 `queue.Queue`(线程安全,标准库)而非 asyncio Queue——daemon 的 `on_event` 是同步调用(从 `subprocess.Popen` 的 stdout 循环里来的),不用 asyncio。RealtimeHub 可以在同步代码里直接调,WS server 从 Queue 里取(异步)。
-
-第二个思想:**晚到订阅者不回放历史**。`publish` 只推给**当前**订阅者——没有缓冲区存历史。如果订阅者在事件发出后才连上,它只收到订阅之后的新事件。历史走 s04 的 `sessions/<task_id>.jsonl`(用 `SessionStore.load(task_id)` 读)。这分了两条路:实时走 WS(只推新事件),历史走 JSONL(全保留)。这样 daemon 不需要内存缓冲历史(省内存、省复杂度)。
-
-第三个思想:**WS server 是薄胶水**。`websockets.serve` 起一个 WS server,handler 从 URL path 解析 `task_id`(`/watch/<task_id>`),`hub.subscribe(task_id)` 订阅,然后循环 `q.get` → `websocket.send(json.dumps(event))`。断开时 `unsubscribe` 清理。WS server 只负责把 hub 的事件透传给远端客户端,不做业务逻辑。
+`key` 在 s06 里就是 `task_id`。谁想看某个 task 的实时进度,就:
 
 ```python
-async def _ws_handler(websocket, hub):
+q = hub.subscribe(task.id)
+```
+
+daemon 有新事件时:
+
+```python
+hub.publish(task.id, ev)
+```
+
+所有订阅了这个 task 的 Queue 都会收到同一份事件。
+
+为什么用 `queue.Queue`,而不是 `asyncio.Queue`?因为 daemon 和 runner 是同步代码。`ClaudeCliRunner` 是在 `subprocess.Popen` 的 stdout 循环里一行行读事件,不是 async 函数。`queue.Queue` 可以让同步的 daemon 直接 `put`,WebSocket 那边再用 executor 去 `get`,两边不用互相改造。
+
+## 4. 为什么晚到订阅者不回放
+
+`RealtimeHub` 没有事件缓存。`publish` 只遍历当下已经订阅的 Queue:
+
+```text
+先 publish,后 subscribe -> 收不到旧事件
+先 subscribe,后 publish -> 收到新事件
+```
+
+这是刻意设计的,原因有两个:
+
+```text
+1. s04 已经负责历史:SessionStore 会把事件写到 sessions/<task_id>.jsonl
+2. Hub 只做实时:不保存、不截断、不判断历史该回放多少
+```
+
+这样概念更干净:
+
+```text
+想看正在发生什么 -> 连 WebSocket
+想查已经发生什么 -> 读 JSONL
+```
+
+对应测试是 `test_late_subscriber_no_replay`。
+
+## 5. WS server: 很薄的一层胶水
+
+WebSocket server 不懂 issue,不懂 task 状态机,也不懂 runner。它只做四步:
+
+```text
+1. 从 URL `/watch/<task_id>` 解析 task_id
+2. `hub.subscribe(task_id)` 得到 Queue
+3. 循环从 Queue 取事件
+4. 把事件 JSON 发给 WebSocket 客户端
+```
+
+代码形状:
+
+```python
+async def _ws_handler(websocket, hub: RealtimeHub) -> None:
     path = websocket.request.path
-    task_id = path.strip("/").split("/")[-1]
+    parts = path.strip("/").split("/")
+    if len(parts) < 2 or parts[0] != "watch":
+        await websocket.close(code=4000, reason="path must be /watch/<task_id>")
+        return
+
+    task_id = parts[1]
     q = hub.subscribe(task_id)
     try:
+        loop = asyncio.get_running_loop()
         while True:
-            event = q.get(timeout=0.5)  # 超时后检查连接,避免线程泄漏
-            if event:
-                await websocket.send(json.dumps(event, ensure_ascii=False))
+            event = await loop.run_in_executor(None, lambda: q.get(timeout=0.5))
+            await websocket.send(json.dumps(event, ensure_ascii=False))
     finally:
         hub.unsubscribe(task_id, q)
 ```
 
-第四个思想:**Daemon 加 hub,on_event 推**。Daemon 的 `on_event` 回调里,除了打印 + 落盘(s04),还调 `self._publish(task.id, ev)`,把事件推给 hub 的订阅者:
+`run_in_executor` 的作用是:不要在 async event loop 里直接阻塞 `q.get()`。Queue 没事件时会等待,所以放到 executor 线程里等;WebSocket handler 自己保持 async。
+
+## 6. Daemon 接入点
+
+Daemon 只多了一个可选参数:
 
 ```python
-# Daemon.execute 的 on_event
-def on_event(ev: dict) -> None:
-    print(f"[event] {ev}")
-    self._record(task.id, ev)      # s04: 落盘 SessionStore
-    self._publish(task.id, ev)      # s06: 推 RealtimeHub → WS 订阅者
+Daemon(..., session_store=sessions, hub=hub)
 ```
 
-daemon 只管执行 + 推事件;谁订阅、怎么展示(终端 print / web 看板 / 其他),由 hub 的订阅者决定。
+内部新增 `_publish`:
 
-## 二、为什么这么设计
-
-### 为什么用 `queue.Queue` 而不是 asyncio Queue?
-
-daemon 的 `on_event` 是从 `subprocess.Popen` 的 stdout 逐行循环里同步调的——那是个 `for line in proc.stdout` 循环,不是 async。用 `queue.Queue`(标准库,线程安全)让 `publish` 在同步代码里直接调(`q.put`),WS server 从 `q.get` 异步取。两条线程(daemon 同步推 + WS async 取)通过 Queue 解耦,不用把 daemon 改成 async。
-
-### 为什么不缓冲历史(让晚到订阅者收到)?
-
-缓冲历史意味着 daemon 要在内存里存每个 task 的事件,等订阅者连上再回放——内存开销 + 复杂度(存多少?何时清?)。s04 已经把事件落盘到 `sessions/<task_id>.jsonl`,晚到订阅者需要历史时读这个文件即可。实时(WS)和历史(JSONL)各走各的:WS 只推新事件(轻、快),JSONL 存全量(重放、审计、截断)。daemon 不缓冲历史,省内存、省复杂度。
-
-### 为什么 WS server 不做业务逻辑?
-
-WS server 只透传:从 hub 取事件 → 发给客户端。不做"哪些事件该发""事件内容怎么改"等业务判断。这样 WS server 不会成为业务逻辑耦合点——hub 是唯一的事件分发中心,WS 只是它的一种消费方式(终端客户端是另一种,直接从 Queue 取)。
-
-## 三、实时推送怎么流转
-
-```
-  daemon 执行 task:
-        │  on_event(ev) → print + _record(task_id, ev) + _publish(task_id, ev)
-        ▼
-  RealtimeHub.publish(task_id, ev)
-        │  遍历 task_id 的所有订阅者 → q.put(ev)
-        ▼
-  WS server handler:
-        │  q.get(ev) → websocket.send(json.dumps(ev))
-        ▼
-  终端 `task watch <id>`:
-        │  ws.recv() → print(msg)
-  ─── 晚到订阅者 ───
-        │  publish 发出时无订阅者 → 事件丢失(不缓冲)
-        │  订阅者连上后只收新事件
-        │  历史走 SessionStore.load(task_id) 读 JSONL
+```python
+def _publish(self, task_id: str, event: dict) -> None:
+    if self.hub is not None:
+        self.hub.publish(task_id, event)
 ```
 
-## 试一试
+然后在 `on_event` 里调用。这个接入方式很重要:没有 hub 时,daemon 仍然能跑;有 hub 时,同一批事件除了落盘,还会实时广播。
+
+也就是说,实时功能是旁路增强,不是主流程依赖。
+
+## 7. demo 怎么读
+
+直接运行:
 
 ```bash
-python -m pytest tests/test_realtime.py -v   # RealtimeHub 单测(不依赖 WS)
-python sessions/zh/s06_realtime.py           # demo:StubRunner + hub + 订阅者收到事件
+python sessions/zh/s06_realtime.py
 ```
 
-demo 用 StubRunner:执行前先 `hub.subscribe(task_id)` 订阅,然后 `daemon.run_once()`,执行后从订阅者 Queue 里取出收到的事件(claim/progress/done/result),打印。
+这个 demo 不启动真正的 WebSocket server,也不依赖 `claude`。它用 `StubRunner` 演示 Hub 本身:
 
-## 四、与完整 multiCa 的区别
+```text
+1. 创建 issue
+2. 入队 task
+3. 先 `hub.subscribe(task.id)`
+4. daemon.run_once()
+5. 从 Queue 里取出执行期间收到的事件
+```
 
-| 维度 | 完整 multiCa(生产) | mica s06 |
-|---|---|---|
-| WS 库 | gorilla/websocket(`hub.go:18`) | websockets(Python asyncio) |
-| 事件分发 | `Broadcaster.BroadcastToScope`(`broadcaster.go:16`)→ Hub rooms(`scopeKey{Type,ID}`)(`hub.go:204`)→ Redis relay XADD/XREADGROUP 多节点(`redis_relay.go:283,290`) | daemon on_event → RealtimeHub → WS |
-| 历史回放 | 无(晚到订阅者从 Redis consumer group 当前位置开始,不回放;历史走 API 读 DB) | 无(晚到走 s04 JSONL) |
-| 订阅模型 | 首帧 auth JWT/PAT(`hub.go:704`)→ auto-subscribe workspace+user(`hub.go:321`)→ subscribe 帧 task/chat scope(`hub.go:375`) | URL path `/watch/<task_id>` 隐式订阅 |
-| ping/pong | pongWait=60s,pingPeriod=54s(`hub.go:195-196`) | 无 |
-| 多节点扩展 | Redis stream relay(多节点 XADD/XREADGROUP) | 无(单节点) |
-| scope 鉴权 | `ScopeAuthorizer.AuthorizeScope`(DB 查资源归属)(`hub.go:40`) | 无 |
+这能证明最核心的一点:只要订阅发生在执行之前,daemon 执行中的事件会实时进入订阅者 Queue。
 
-一句话:**s06 把 multiCa「执行事件实时推给 WS 订阅者」做出来了——RealtimeHub 纯 pub/sub + WS server 薄胶水 + daemon on_event 推**;砍掉的是 Redis 多节点 relay、scope 鉴权、ping/pong、首帧 auth——那些是生产化主题。
+## 8. 终端 watch 的使用方式
+
+代码里提供了两个函数:
+
+```python
+run_ws_server(hub, port)
+watch_task(host, port, task_id)
+```
+
+实际产品化时通常是两个进程:
+
+```text
+进程 A: daemon + hub + run_ws_server(hub, port)
+进程 B: watch_task("127.0.0.1", port, task_id)
+```
+
+`watch_task` 会连接:
+
+```text
+ws://<host>:<port>/watch/<task_id>
+```
+
+然后不断 `recv()` 并打印服务端推来的 JSON 事件。
+
+本章文件没有做完整 CLI 命令分发,因为重点是教学实时链路;自动化测试也主要测 `RealtimeHub` 的语义。
+
+## 9. 测试覆盖了什么
+
+运行:
+
+```bash
+python -m pytest tests/test_realtime.py -v
+```
+
+测试覆盖的是 Hub 的核心承诺:
+
+```text
+subscribe 后 publish 能收到
+多个订阅者都能收到
+晚到订阅者不回放历史
+unsubscribe 后不再收到
+不同 key 互相隔离
+subscriber_count 返回当前订阅数
+```
+
+这些测试不依赖网络,也不依赖 `claude`。这是故意的:实时层最需要先保证的是发布/订阅语义正确,WebSocket 只是传输外壳。
+
+## 10. 本章边界
+
+s06 做了:
+
+```text
+daemon 执行事件 -> RealtimeHub -> WebSocket -> watch 客户端
+```
+
+s06 不做:
+
+```text
+历史回放          交给 s04 SessionStore
+Web 看板          下一章 s07
+鉴权              后续 workspace/member 章节再讲
+多节点广播        mica 保持单进程/单机教学模型
+ping/pong 保活    生产化主题,本章先省掉
+```
+
+一句话总结:**s06 把“执行中发生了什么”从 daemon 进程里推出来。历史继续落 JSONL,实时新增 RealtimeHub + WebSocket,两条路径互不抢职责。**

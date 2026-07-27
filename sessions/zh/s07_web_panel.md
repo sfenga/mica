@@ -1,35 +1,121 @@
-# s07 — FastAPI 单页看板(create/transition/comment + WS realtime)
+# s07 — FastAPI 单页看板
 
-s06 让事件能实时推给 WS 订阅者了,但用户没有地方**操作**——只能命令行跑。s07 加一个 FastAPI 单页看板:浏览器打开就能看到 issue 列表、创建+派活、行内改状态、发评论(触发 follow-up task)、选中某条 issue 实时看执行进度。零构建(HTML 内联 JS,无 npm/webpack)。
+s06 已经能把 daemon 执行中的事件实时推给 WebSocket 订阅者。但到这里,用户仍然缺一个“操作面”:
 
-## 一、核心设计思想
+```text
+怎么创建 issue?
+怎么把 issue 派给 agent?
+怎么手动推进状态?
+怎么发表评论触发 follow-up task?
+怎么看某条 issue 的实时进度?
+```
 
-第一个思想:**create_app 把 store 和 hub 闭包进路由**。FastAPI 的路由函数闭包引用传入的 `issue_store` / `task_store` / `hub`——不需要全局变量,测试时传新 store 就能隔离:
+s07 给 mica 加一个最小 Web 看板。它不是完整前端工程,而是一个 FastAPI 服务返回单页 HTML:
+
+```text
+GET /        返回 HTML_PAGE,里面内联 JS
+API 路由     创建 / 列表 / 状态转移 / 评论
+WS 路由      按 issue_id 订阅实时事件
+```
+
+本章的重点不是 UI 漂亮,而是把前面六章的能力接到浏览器里。
+
+## 1. s07 新增了什么
+
+s07 在 s06 的基础上只新增 Web 层:
+
+```text
+create_app(...)        构造 FastAPI app
+HTML_PAGE              单页 HTML + 内联 JavaScript
+GET /api/issues        列 issue
+POST /api/issues       创建 issue,必要时入队 task
+PATCH /api/issues/{id}/status
+                       走状态机改状态
+POST /api/issues/{id}/comments
+                       评论并入队 follow-up task
+WS /ws/issues/{id}     按 issue 订阅实时事件
+```
+
+它没有引入数据库、前端构建、认证或多 workspace 权限。stores 仍然是前几章的 `IssueStore` / `TaskStore` / `SessionStore`。
+
+## 2. create_app: 把 stores 闭包进路由
+
+FastAPI app 由函数创建:
 
 ```python
-def create_app(issue_store, task_store, hub):
+def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub) -> FastAPI:
     app = FastAPI()
-
-    @app.get("/api/issues")
-    def list_issues():
-        return [_issue_to_dict(i) for i in issue_store.list()]
-
-    @app.post("/api/issues")
-    def create_issue(title: str = "", assignee_type: str = "agent",
-                     assignee_id: str = ""):
-        issue = issue_store.create("ws-1", title or "(untitled)",
-                                    assignee_type=assignee_type,
-                                    assignee_id=assignee_id)
-        if assignee_type == "agent" and assignee_id:
-            task_store.enqueue(issue.id, assignee_type, assignee_id)
-        return _issue_to_dict(issue)
     ...
     return app
 ```
 
-POST /api/issues 创建 issue 后,如果指派给了 agent,立刻入队一条 queued task——issue 一出现在看板上就已经派活了。
+路由函数直接使用传入的 store 和 hub:
 
-第二个思想:**PATCH 状态转移复用 s01 状态机**。看板上行内改状态(`in_progress→in_review` 等)走的是 `IssueStore.transition()`——和 CLI 调用同一个状态机,合法转移放行,非法(如 `todo→done` 跳过 `in_progress`)返回 `{"error": ...}`:
+```python
+@app.get("/api/issues")
+def list_issues():
+    return [_issue_to_dict(i) for i in issue_store.list()]
+```
+
+这种写法有两个好处:
+
+```text
+main() 里传真实 store,启动服务
+测试里传空 store,每个 TestClient 互相隔离
+```
+
+所以 `tests/test_web_panel.py` 不需要启动真实端口,也不需要跑 daemon。
+
+## 3. GET /: 零构建单页
+
+首页路由直接返回一个字符串:
+
+```python
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTML_PAGE
+```
+
+`HTML_PAGE` 里内联了 JavaScript。页面做四件事:
+
+```text
+refresh()       fetch('/api/issues'),渲染表格
+createForm      POST /api/issues
+transition()    PATCH /api/issues/{id}/status
+watch()         new WebSocket('/ws/issues/' + id)
+```
+
+为什么零构建?因为 s07 是教学章节。引入 npm、打包器、组件库会把重点从“后端机制怎么接到页面”转移到前端工程配置。一个 HTML 字符串足够展示闭环。
+
+## 4. 创建 issue 时顺手派活
+
+创建接口:
+
+```python
+@app.post("/api/issues")
+def create_issue(title: str = "", assignee_type: str = "agent", assignee_id: str = ""):
+    issue = issue_store.create("ws-1", title or "(untitled)",
+                               assignee_type=assignee_type, assignee_id=assignee_id)
+    if assignee_type == "agent" and assignee_id:
+        task_store.enqueue(issue.id, assignee_type, assignee_id)
+    return _issue_to_dict(issue)
+```
+
+这里有一个重要连接:
+
+```text
+创建 issue
+如果 assignee 是 agent
+立刻 enqueue 一条 queued task
+```
+
+这样浏览器里创建一张派给 `agent-1` 的卡,后台 daemon 就能在下一轮 poll 认领它。
+
+如果 assignee 不是 agent,或者没有 assignee_id,就只创建 issue,不入队 task。这个规则延续 s01/s02 的多态 assignee。
+
+## 5. 状态修改复用 s01 状态机
+
+状态接口:
 
 ```python
 @app.patch("/api/issues/{issue_id}/status")
@@ -41,9 +127,26 @@ def update_status(issue_id: str, status: str):
     return _issue_to_dict(issue_store.get(issue_id))
 ```
 
-状态机逻辑只有一处(s01 的 `VALID_TRANSITIONS`),CLI、web 看板、daemon 驱动都走它,不会出现"web 能改但 CLI 不认"的分裂。
+Web 没有重新实现状态规则。它仍然调用 s01 的:
 
-第三个思想:**评论入队 follow-up task**。POST /api/issues/{id}/comments 调 s05 的 `comment_and_enqueue` 逻辑——追加评论 + 为 assignee 入队新 queued task,issue 状态**不变**:
+```text
+IssueStore.transition()
+VALID_TRANSITIONS
+```
+
+所以:
+
+```text
+in_progress -> in_review  合法
+in_review -> done         合法
+todo -> done              非法,返回 {"error": "..."}
+```
+
+当前实现对非法转移返回 `200 + {"error": ...}`。这不是生产 API 风格,但让本章前端保持简单:所有响应都按 JSON 解析,合法时是 issue dict,非法时是 error dict。
+
+## 6. 评论接口接 s05
+
+评论接口:
 
 ```python
 @app.post("/api/issues/{issue_id}/comments")
@@ -54,9 +157,50 @@ def add_comment(issue_id: str, text: str = ""):
     return {"issue": _issue_to_dict(issue), "task_id": task.id}
 ```
 
-评论触发的 follow-up task 和手动创建的 task 走同一条 daemon 认领→执行→标终态链路。
+它做两件事:
 
-第四个思想:**WS 按 issue_id 订阅实时进度**。s06 的 `RealtimeHub` 按 key 推事件;s07 的 Daemon `_publish` 额外按 `issue_id` 推(除了按 `task_id`),让 WS `/ws/issues/{id}` 能按 issue 级订阅:
+```text
+IssueStore.comment(...)      追加评论,不改 issue 状态
+TaskStore.enqueue(...)       新建 follow-up task
+```
+
+这就是 s05 的模型搬到 Web API 上:
+
+```text
+评论不是 reopen issue
+评论是制造下一次 agent 执行
+```
+
+当前代码没有检查 assignee 是否为空或是否 agent;它按 issue 当前 assignee 入队。这是教学版的简化。生产系统会做更复杂的评论路由、权限和触发目标解析。
+
+## 7. 为什么 WS 按 issue_id 订阅
+
+s06 的终端 watch 是按 task_id 看事件。但看板用户点击的是 issue 行。
+
+所以 s07 让 daemon 同时按两个 key 发布:
+
+```text
+task_id    给 task watch 用
+issue_id   给 Web 看板用
+```
+
+s07 的 `Daemon._publish` 支持 `issue_id`:
+
+```python
+def _publish(self, task_id: str, event: dict, issue_id: str | None = None) -> None:
+    if self.hub is not None:
+        self.hub.publish(task_id, event)
+        if issue_id:
+            self.hub.publish(issue_id, event)
+```
+
+`on_event` 里会传入当前 task 的 issue:
+
+```python
+daemon._publish(task.id, ev, issue_id=task.issue_id)
+```
+
+然后 WebSocket 路由订阅 issue:
 
 ```python
 @app.websocket("/ws/issues/{issue_id}")
@@ -72,59 +216,123 @@ async def ws_issues(websocket: WebSocket, issue_id: str):
         hub.unsubscribe(issue_id, q)
 ```
 
-前端 JS 连上这个 WS,选中某条 issue 后实时显示该 issue 的 task 执行进度(claim/progress/done/result 事件)。
+这样同一条 issue 的首次执行、评论 follow-up、重跑 task,都能被页面的 issue 级 watch 收到。
 
-## 二、为什么这么设计
+## 8. main() 启动了什么
 
-### 为什么零构建(内联 HTML+JS)?
-
-不引入 npm/webpack/babel 构建链——降低门槛。一个 HTML 字符串(内联 `<script>`)就够:`fetch` 调 API、`WebSocket` 连实时、`<table>` 渲染 issue 列表、`<form>` 创建、`<select>` 状态转移、`<input>` 评论。没有外部文件、没有打包步骤,`uvicorn` 直接服务。
-
-### 为什么 PATCH 非法转移返回 error dict(200)而不是 HTTP 400?
-
-返回 `{"error": "..."}` + HTTP 200 让前端 JS 不需要区分"业务错误"(非法转移)和"HTTP 错误"(404/500)。前端 `fetch().then(res => res.json())` 总是拿到 JSON,合法返回 issue dict、非法返回 `{"error": ...}`,JS 用 `"error" in data` 判断。如果用 HTTP 400,前端要 `res.ok` 分支处理两种 JSON 格式,复杂度更高。
-
-### 为什么 WS 按 issue_id 而不是 task_id?
-
-看板展示的是 issue 行;用户点击一条 issue 看进度——他关心的是"这条 issue 的执行到哪了",不是"某条具体 task 的事件"。按 issue_id 订阅,无论当前是哪条 task 在跑(首次执行、评论 follow-up、重跑),issue 级 WS 都能收到事件。Daemon `_publish` 额外推 issue_id 实现了这个映射。
-
-## 三、看板怎么流转
-
-```
-  浏览器打开 http://localhost:8000/
-        │  GET / → 返回 HTML_PAGE(内联 JS)
-        │  JS fetch GET /api/issues → 渲染 issue 表
-        ▼
-  用户操作:
-        │  创建:POST /api/issues?title=...&assignee_id=... → issue + task 入队
-        │  状态:PATCH /api/issues/{id}/status?status=in_review → 状态机校验
-        │  评论:POST /api/issues/{id}/comments?text=... → 评论 + follow-up task 入队
-        │  watch:WebSocket /ws/issues/{id} → 实时收到 daemon 推的事件
-        ▼
-  daemon 后台轮询 task 队列 → 认领 → 执行 → on_event → _publish(task_id, ev, issue_id)
-        │  hub.publish(task_id, ev)   → task 级订阅者
-        │  hub.publish(issue_id, ev)  → issue 级 WS 订阅者(看板 watch)
-```
-
-## 试一试
+直接运行:
 
 ```bash
-python -m pytest tests/test_web_panel.py -v   # API 路由单测(TestClient,不调 claude)
-python sessions/zh/s07_web_panel.py           # 启动 uvicorn(StubRunner 后台 daemon)
-# 浏览器打开 http://localhost:8000/
+python sessions/zh/s07_web_panel.py
 ```
 
-启动后:看板页面列 issue、创建表单(title + agent id)、状态下拉(in_progress/in_review/done/blocked)、watch 按钮(连 WS 看实时进度)。daemon 用 StubRunner 后台轮询,自动认领 task 执行。
+`main()` 会做这些事:
 
-## 四、与完整 multiCa 的区别
+```text
+创建 data_dir
+创建 IssueStore / TaskStore / SessionStore
+创建 RealtimeHub
+创建 agent-1
+创建 Daemon(..., StubRunner(), hub=hub)
+后台线程启动 daemon.loop()
+create_app(...)
+uvicorn.run(..., port=8000)
+```
 
-| 维度 | 完整 multiCa(生产) | mica s07 |
-|---|---|---|
-| 前端 | Next.js App Router(全功能) | FastAPI 单页 HTML(内联 JS,零构建) |
-| API | Go Chi router + REST | FastAPI(Python) |
-| 状态转移 | DB + 应用层校验 | 复用 s01 `IssueStore.transition()` |
-| 评论 | `CreateComment` → `triggerTasksForComment` 三路分流 | 简化:comment + enqueue 新 task |
-| 实时 | RealtimeHub → Redis relay → WS(多节点) | RealtimeHub → WS(单节点,按 issue_id) |
-| auth | JWT + 成员资格闸门 | 无(本地) |
+所以浏览器里创建 issue 后,后台 daemon 会用 `StubRunner` 自动认领执行。这个 demo 不依赖真实 `claude`。
 
-一句话:**s07 把 multiCa「看板 + 创建 + 状态转移 + 评论 + 实时」做出来了——FastAPI 单页、零构建、复用 s01 状态机和 s06 RealtimeHub**;砍掉的是 Next.js 全功能前端、Redis 多节点 relay、JWT auth——那些是生产化主题。
+访问:
+
+```text
+http://localhost:8000/
+```
+
+页面会显示:
+
+```text
+issue 表格
+创建表单
+状态下拉
+watch 按钮
+progress 文本区域
+```
+
+## 9. 整体链路
+
+```text
+浏览器打开 /
+   |
+   v
+HTML_PAGE 内联 JS
+   |
+   |-- GET /api/issues -> 渲染列表
+   |
+   |-- POST /api/issues
+   |      -> IssueStore.create()
+   |      -> 如果 assignee 是 agent,TaskStore.enqueue()
+   |
+   |-- PATCH /api/issues/{id}/status
+   |      -> IssueStore.transition()
+   |
+   |-- POST /api/issues/{id}/comments
+   |      -> IssueStore.comment()
+   |      -> TaskStore.enqueue(trigger_comment_id=text)
+   |
+   `-- WS /ws/issues/{id}
+          -> hub.subscribe(issue_id)
+          -> 收 daemon 发布的事件
+
+后台 daemon.loop()
+   |
+   v
+claim queued task -> StubRunner.run() -> on_event -> hub.publish(task_id + issue_id)
+```
+
+## 10. 测试覆盖了什么
+
+运行:
+
+```bash
+python -m pytest tests/test_web_panel.py -v
+```
+
+测试覆盖:
+
+```text
+GET /api/issues 空列表
+POST /api/issues 创建 issue 并入队 task
+PATCH 合法状态转移
+PATCH 非法状态转移返回 error
+POST /comments 追加评论并创建 task
+GET / 返回 HTML
+```
+
+这些测试用 FastAPI `TestClient`,不启动真实 uvicorn,不调 `claude`,也不需要浏览器。
+
+## 11. 本章边界
+
+s07 做了:
+
+```text
+FastAPI app
+单页 HTML
+issue 列表
+创建 issue 并派活
+状态转移 API
+评论 follow-up API
+issue 级 WebSocket 实时订阅
+StubRunner 后台 daemon demo
+```
+
+s07 不做:
+
+```text
+前端构建系统
+认证/授权
+workspace 成员资格
+生产级错误码
+复杂评论路由
+漂亮 UI
+```
+
+一句话总结:**s07 把前六章接成一个可点的本地看板。浏览器负责创建、评论、改状态和订阅进度;真正的执行仍然走 task 队列和 daemon。**

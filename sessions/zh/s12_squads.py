@@ -1,13 +1,14 @@
-"""s11 — 多 workspace 隔离 + 成员资格闸门
+"""s12 — Squads leader-first 协调模型
 
-在 s10(多 CLI 探测 + 1:N daemon)之上叠加:
-- MemberStore:members.jsonl 持久化 workspace_id -> {member_id} 集合。
-  同 IssueStore/TaskStore 的 JSONL snapshot-append + last-wins 模式。
-- WorkspaceScope:在 IssueStore 查询时注入 workspace_id 过滤 + 成员校验的薄封装。
-- IssueStore.list/create 增可选 member_id + member_store 参数:非成员抛 PermissionError。
-  默认 None → 不校验(向后兼容,s01-s10 测试不受影响)。
-- main():两 workspace + 成员校验 demo(alice 访问 ws-a、被 ws-b 拒绝)。
+本文件是 s01-s12 的累积教学代码。s12 在 s11 的 workspace/member 基础上,
+加入一个教学版 squad 编排器:
+- squad 可以成为 issue assignee;
+- 系统先唤醒 leader agent,而不是直接哈希选择 worker;
+- leader task 携带 is_leader_task + squad_id,用于注入 briefing;
+- leader 可委派 worker,worker 回报和 child stage 完成会再次唤醒 leader。
 """
+from __future__ import annotations
+
 import asyncio
 import glob
 import json
@@ -318,8 +319,10 @@ class Issue:
     title: str
     body: str = ""
     status: IssueStatus = IssueStatus.TODO
-    assignee_type: str = ""       # "" | "member" | "agent"
+    assignee_type: str = ""       # "" | "member" | "agent" | "squad"
     assignee_id: str = ""
+    parent_issue_id: str = ""     # s12:子 issue 指向父 issue
+    stage: int | None = None      # s12:阶段号;None 表示不参加显式 stage
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     error: str = ""
@@ -348,6 +351,8 @@ def _issue_from_dict(d: dict) -> Issue:
         status=IssueStatus(d["status"]),
         assignee_type=d.get("assignee_type", ""),
         assignee_id=d.get("assignee_id", ""),
+        parent_issue_id=d.get("parent_issue_id", ""),
+        stage=d.get("stage"),
         created_at=d.get("created_at", ""),
         updated_at=d.get("updated_at", ""),
         error=d.get("error", ""),
@@ -387,6 +392,8 @@ class IssueStore:
 
     def create(self, workspace_id: str, title: str, body: str = "",
                assignee_type: str = "", assignee_id: str = "",
+               parent_issue_id: str = "", stage: int | None = None,
+               status: IssueStatus = IssueStatus.TODO,
                member_id: str | None = None,
                member_store: "MemberStore | None" = None) -> Issue:
         if member_id and member_store:
@@ -398,8 +405,11 @@ class IssueStore:
             workspace_id=workspace_id,
             title=title,
             body=body,
+            status=status,
             assignee_type=assignee_type,
             assignee_id=assignee_id,
+            parent_issue_id=parent_issue_id,
+            stage=stage,
         )
         self._issues[issue.id] = issue
         self._persist(issue)
@@ -422,6 +432,12 @@ class IssueStore:
 
     def get(self, issue_id: str) -> Issue | None:
         return self._issues.get(issue_id)
+
+    def children(self, parent_issue_id: str) -> list[Issue]:
+        return [
+            i for i in self._issues.values()
+            if i.parent_issue_id == parent_issue_id
+        ]
 
     def assign(self, issue_id: str, assignee_type: str, assignee_id: str) -> Issue:
         issue = self._require(issue_id)
@@ -560,6 +576,9 @@ class Task:
     trigger_comment_id: str = ""
     rerun_of_task_id: str = ""
     prior_session_id: str = ""
+    is_leader_task: bool = False  # s12:leader 角色 task,claim 时注入 squad briefing
+    squad_id: str = ""            # s12:leader/worker task 属于哪个 squad
+    handoff_note: str = ""        # s12:leader 委派或系统唤醒原因
     created_at: str = field(default_factory=now_iso)
     claimed_at: str = ""
     completed_at: str = ""
@@ -586,6 +605,9 @@ def _task_from_dict(d: dict) -> Task:
         trigger_comment_id=d.get("trigger_comment_id", ""),
         rerun_of_task_id=d.get("rerun_of_task_id", ""),
         prior_session_id=d.get("prior_session_id", ""),
+        is_leader_task=d.get("is_leader_task", False),
+        squad_id=d.get("squad_id", ""),
+        handoff_note=d.get("handoff_note", ""),
         created_at=d.get("created_at", ""),
         claimed_at=d.get("claimed_at", ""),
         completed_at=d.get("completed_at", ""),
@@ -641,7 +663,9 @@ class TaskStore:
         return n
 
     def enqueue(self, issue_id: str, assignee_type: str, assignee_id: str,
-                trigger_comment_id: str = "", rerun_of_task_id: str = "") -> Task:
+                trigger_comment_id: str = "", rerun_of_task_id: str = "",
+                is_leader_task: bool = False, squad_id: str = "",
+                handoff_note: str = "") -> Task:
         with self._lock:
             task = Task(
                 id=str(uuid.uuid4()),
@@ -650,6 +674,9 @@ class TaskStore:
                 assignee_id=assignee_id,
                 trigger_comment_id=trigger_comment_id,
                 rerun_of_task_id=rerun_of_task_id,
+                is_leader_task=is_leader_task,
+                squad_id=squad_id,
+                handoff_note=handoff_note,
             )
             self._tasks[task.id] = task
             self._persist(task)
@@ -663,6 +690,22 @@ class TaskStore:
     def get(self, task_id: str) -> Task | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def has_pending(self, issue_id: str, assignee_id: str,
+                    is_leader_task: bool | None = None) -> bool:
+        pending = {TaskStatus.QUEUED, TaskStatus.DISPATCHED, TaskStatus.RUNNING}
+        with self._lock:
+            for task in self._tasks.values():
+                if task.issue_id != issue_id:
+                    continue
+                if task.assignee_id != assignee_id:
+                    continue
+                if task.status not in pending:
+                    continue
+                if is_leader_task is not None and task.is_leader_task != is_leader_task:
+                    continue
+                return True
+        return False
 
     def claim(self, task_id: str) -> bool:
         """CAS 认领:仅当 status==queued 才置 dispatched。返回是否成功。"""
@@ -1453,63 +1496,374 @@ class Scheduler:
 
 
 # ===========================================================================
-# s12 — Squads(可选附录):Squad dataclass + SquadRouter
-# leader agent 把派给 squad 的 issue 委派给成员 agent(round-robin 选成员 → 子 task)。
+# s12 — Squads:leader-first 协调模型(教学版)
+# multiCa 的 squad 不是负载均衡队列,而是一个可分配对象:
+# issue 派给 squad -> 系统唤醒 leader -> leader 根据 roster/skills 委派 worker。
 # ===========================================================================
+@dataclass
+class SquadMember:
+    member_type: str            # "agent" | "member"
+    member_id: str
+    role: str = ""
+    skills: list[str] = field(default_factory=list)
+
+
 @dataclass
 class Squad:
     id: str
     name: str
     leader_agent_id: str
-    member_agent_ids: list = field(default_factory=list)
+    description: str = ""
+    instructions: str = ""
+    members: list[SquadMember] = field(default_factory=list)
+    # 兼容早期 s12 测试/示例:传 member_agent_ids 时自动转成 agent members。
+    member_agent_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        existing = {(m.member_type, m.member_id) for m in self.members}
+        for agent_id in self.member_agent_ids:
+            key = ("agent", agent_id)
+            if key not in existing:
+                self.members.append(SquadMember("agent", agent_id))
+                existing.add(key)
+        leader_key = ("agent", self.leader_agent_id)
+        if leader_key not in existing:
+            self.members.insert(0, SquadMember("agent", self.leader_agent_id, "leader"))
+
+
+@dataclass
+class SquadActivity:
+    issue_id: str
+    squad_id: str
+    actor_id: str
+    outcome: str                 # "action" | "no_action" | "failed"
+    reason: str
+    created_at: str = field(default_factory=now_iso)
 
 
 class SquadRouter:
-    """leader agent 把派给 squad 的 issue 委派给成员 agent。"""
+    """教学版 squad 编排器。
 
-    def __init__(self, issue_store, task_store):
+    它覆盖 multiCa squads 的核心路径:
+    - squad 可以成为 issue assignee;
+    - 派给 squad 时先入队 leader task;
+    - leader task 通过 is_leader_task+squad_id 获得 squad briefing;
+    - leader 再委派 worker agent;
+    - worker 回报、child stage 完成都会重新唤醒 leader。
+    """
+
+    def __init__(self, issue_store: IssueStore, task_store: TaskStore):
         self.issue_store = issue_store
         self.task_store = task_store
         self._squads: dict[str, Squad] = {}
+        self._activities: list[SquadActivity] = []
 
-    def register(self, squad: Squad):
+    def register(self, squad: Squad) -> None:
         self._squads[squad.id] = squad
 
-    def route(self, issue_id, squad_id) -> str | None:
-        """派给 squad 的 issue:leader 选成员 agent → 创建子 task。
-        返回成员 agent_id,或 None(squad 无成员)。"""
-        squad = self._squads.get(squad_id)
-        if not squad or not squad.member_agent_ids:
-            return None
-        # 简化:轮流选(round-robin,基于 issue_id 的确定性哈希)
-        import hashlib
-        idx = int(hashlib.md5(issue_id.encode()).hexdigest(), 16) % len(squad.member_agent_ids)
-        chosen = squad.member_agent_ids[idx]
-        # 为成员 agent 入队 task(issue 不变,assignee 换成成员 agent)
-        self.task_store.enqueue(issue_id, "agent", chosen)
-        return chosen
+    def get(self, squad_id: str) -> Squad | None:
+        return self._squads.get(squad_id)
 
     def list_squads(self) -> list[Squad]:
         return list(self._squads.values())
 
+    def assign_issue_to_squad(self, issue_id: str, squad_id: str,
+                              handoff_note: str = "issue assigned to squad") -> Task | None:
+        """把 issue 派给 squad,但真正入队的是 leader task。"""
+        squad = self._squads.get(squad_id)
+        if not squad:
+            return None
+        issue = self.issue_store.assign(issue_id, "squad", squad_id)
+        return self._enqueue_leader(issue, squad, handoff_note=handoff_note)
 
-def main(data_dir="./workspace") -> int:
-    os.makedirs(data_dir, exist_ok=True)
-    is_ = IssueStore(data_dir=data_dir)
-    ts = TaskStore(data_dir=data_dir)
+    def route(self, issue_id: str, squad_id: str) -> str | None:
+        """向后兼容旧 s12 名称:route 现在表示 route to leader。"""
+        task = self.assign_issue_to_squad(issue_id, squad_id)
+        return task.assignee_id if task else None
+
+    def build_leader_briefing(self, squad_id: str) -> str:
+        """生成 leader claim 时应追加到 instructions 的 squad briefing。"""
+        squad = self._require_squad(squad_id)
+        lines = [
+            "## Squad Operating Protocol",
+            "",
+            "You are the squad leader. Coordinate the work; do not silently do every task yourself.",
+            "Choose the right member from the roster, delegate with a mention-style instruction,",
+            "record the decision, then stop and wait for the next trigger.",
+            "",
+            "## Squad Roster",
+            "",
+        ]
+        for member in squad.members:
+            name = member.member_id
+            role = f', role: "{member.role}"' if member.role else ""
+            skills = f" — skills: {', '.join(member.skills)}" if member.skills else ""
+            leader = " (leader)" if member.member_type == "agent" and member.member_id == squad.leader_agent_id else ""
+            mention = f"[@{name}](mention://{member.member_type}/{member.member_id})"
+            lines.append(f"- {name}{leader} — {member.member_type}{role}{skills} — `{mention}`")
+        if squad.instructions.strip():
+            lines += ["", f"## Squad Instructions ({squad.name})", "", squad.instructions.strip()]
+        return "\n".join(lines)
+
+    def delegate(self, issue_id: str, squad_id: str, member_agent_id: str,
+                 note: str) -> Task:
+        """leader 把当前 issue 委派给 squad 内某个 agent 成员。"""
+        squad = self._require_squad(squad_id)
+        self._require_agent_member(squad, member_agent_id)
+        mention = f"[@{member_agent_id}](mention://agent/{member_agent_id})"
+        self.issue_store.comment(issue_id, f"{mention} {note}".strip())
+        return self.task_store.enqueue(
+            issue_id, "agent", member_agent_id,
+            trigger_comment_id=note,
+            is_leader_task=False,
+            squad_id=squad.id,
+            handoff_note=note,
+        )
+
+    def worker_report(self, issue_id: str, squad_id: str, worker_agent_id: str,
+                      text: str) -> Task | None:
+        """worker 评论后唤醒 leader;已有 pending leader task 时去重。"""
+        squad = self._require_squad(squad_id)
+        self._require_agent_member(squad, worker_agent_id)
+        self.issue_store.comment(issue_id, f"agent:{worker_agent_id}: {text}")
+        if self.task_store.has_pending(issue_id, squad.leader_agent_id, is_leader_task=True):
+            return None
+        issue = self.issue_store.get(issue_id)
+        if issue is None:
+            raise KeyError(f"issue 不存在:{issue_id}")
+        return self._enqueue_leader(issue, squad, handoff_note=f"worker {worker_agent_id} reported")
+
+    def record_activity(self, issue_id: str, squad_id: str, actor_id: str,
+                        outcome: str, reason: str) -> SquadActivity:
+        if outcome not in {"action", "no_action", "failed"}:
+            raise ValueError("outcome must be action/no_action/failed")
+        activity = SquadActivity(issue_id, squad_id, actor_id, outcome, reason)
+        self._activities.append(activity)
+        self.issue_store.comment(issue_id, f"squad activity: {outcome} — {reason}")
+        return activity
+
+    def list_activities(self, issue_id: str | None = None) -> list[SquadActivity]:
+        return [
+            a for a in self._activities
+            if issue_id is None or a.issue_id == issue_id
+        ]
+
+    def create_child_issue(self, parent_issue_id: str, title: str,
+                           assignee_type: str, assignee_id: str,
+                           stage: int | None = None,
+                           status: IssueStatus = IssueStatus.TODO) -> Issue:
+        parent = self.issue_store.get(parent_issue_id)
+        if parent is None:
+            raise KeyError(f"parent issue 不存在:{parent_issue_id}")
+        child = self.issue_store.create(
+            parent.workspace_id, title,
+            assignee_type=assignee_type,
+            assignee_id=assignee_id,
+            parent_issue_id=parent_issue_id,
+            stage=stage,
+            status=status,
+        )
+        # multiCa 中,一个 todo child issue 如果直接 assign 给 agent,会触发该 agent。
+        # s12 用一条普通 worker task 表达这件事;如果 child 只是 backlog,则先不派发。
+        if assignee_type == "agent" and status == IssueStatus.TODO:
+            self.task_store.enqueue(
+                child.id,
+                "agent",
+                assignee_id,
+                is_leader_task=False,
+                squad_id=parent.assignee_id if parent.assignee_type == "squad" else "",
+                handoff_note=f"child issue stage {stage}: {title}" if stage is not None else f"child issue: {title}",
+            )
+        return child
+
+    def notify_child_done(self, child_issue_id: str) -> Task | None:
+        """child issue 进入 terminal 后,若 stage barrier 关闭,唤醒父 issue 的 leader。"""
+        child = self.issue_store.get(child_issue_id)
+        if child is None or not child.parent_issue_id:
+            return None
+        if not self._is_terminal(child.status):
+            return None
+        parent = self.issue_store.get(child.parent_issue_id)
+        if parent is None:
+            return None
+        if parent.status in {IssueStatus.DONE, IssueStatus.CANCELLED, IssueStatus.BACKLOG}:
+            return None
+        if parent.assignee_type != "squad":
+            return None
+        squad = self._squads.get(parent.assignee_id)
+        if not squad or not self._stage_barrier_closed(parent.id, child):
+            return None
+        if self.task_store.has_pending(parent.id, squad.leader_agent_id, is_leader_task=True):
+            return None
+        self.issue_store.comment(parent.id, f"system: child stage complete after '{child.title}'")
+        return self._enqueue_leader(parent, squad, handoff_note="child stage completed")
+
+    def member_status(self, squad_id: str) -> list[dict]:
+        """教学版成员状态:从 active task 推导 working/idle/human。"""
+        squad = self._require_squad(squad_id)
+        rows = []
+        for member in squad.members:
+            if member.member_type != "agent":
+                rows.append({"member_id": member.member_id, "member_type": "member",
+                             "status": "human", "active_issues": []})
+                continue
+            active = [
+                t.issue_id for t in self.task_store.list()
+                if t.assignee_id == member.member_id
+                and t.status in {TaskStatus.QUEUED, TaskStatus.DISPATCHED, TaskStatus.RUNNING}
+            ]
+            rows.append({
+                "member_id": member.member_id,
+                "member_type": "agent",
+                "status": "working" if active else "idle",
+                "active_issues": active,
+            })
+        return rows
+
+    def _enqueue_leader(self, issue: Issue, squad: Squad, handoff_note: str) -> Task:
+        return self.task_store.enqueue(
+            issue.id,
+            "agent",
+            squad.leader_agent_id,
+            is_leader_task=True,
+            squad_id=squad.id,
+            handoff_note=handoff_note,
+        )
+
+    def _require_squad(self, squad_id: str) -> Squad:
+        squad = self._squads.get(squad_id)
+        if not squad:
+            raise KeyError(f"squad 不存在:{squad_id}")
+        return squad
+
+    def _require_agent_member(self, squad: Squad, agent_id: str) -> None:
+        for member in squad.members:
+            if member.member_type == "agent" and member.member_id == agent_id:
+                return
+        raise PermissionError(f"agent {agent_id} is not in squad {squad.id}")
+
+    def _is_terminal(self, status: IssueStatus) -> bool:
+        return status in {IssueStatus.DONE, IssueStatus.CANCELLED}
+
+    def _stage_barrier_closed(self, parent_issue_id: str, completed: Issue) -> bool:
+        children = self.issue_store.children(parent_issue_id)
+        if not children:
+            return False
+        staged = any(c.stage is not None for c in children)
+        if not staged:
+            return all(self._is_terminal(c.status) for c in children)
+        if completed.stage is None:
+            return False
+        for child in children:
+            if child.stage is None:
+                continue
+            if child.stage <= completed.stage and not self._is_terminal(child.status):
+                return False
+        return True
+
+
+def _short_task(task: Task | None) -> str:
+    if task is None:
+        return "none"
+    role = "leader" if task.is_leader_task else "worker"
+    return f"{task.assignee_id} ({role}, {task.status.value}, note={task.handoff_note})"
+
+
+def _complete_issue_work(issue_store: IssueStore, task_store: TaskStore, issue: Issue) -> None:
+    for task in task_store.list(issue.id):
+        if task.status in {TaskStatus.QUEUED, TaskStatus.DISPATCHED, TaskStatus.RUNNING}:
+            task_store.complete(task.id)
+    if issue.status == IssueStatus.TODO:
+        issue_store.transition(issue.id, IssueStatus.IN_PROGRESS)
+    if issue.status == IssueStatus.IN_PROGRESS:
+        issue_store.transition(issue.id, IssueStatus.DONE)
+
+
+def _print_member_status(router: SquadRouter, squad_id: str) -> None:
+    print("member status:")
+    for row in router.member_status(squad_id):
+        active = ",".join(i[:8] for i in row["active_issues"]) or "-"
+        print(f"  - {row['member_id']}: {row['status']} active={active}")
+
+
+def main(data_dir=None) -> int:
+    # Demo 使用内存 store,保证每次运行输出同一条完整流程,不受 workspace/*.jsonl 历史影响。
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
+    is_ = IssueStore(data_dir=data_dir) if data_dir else IssueStore()
+    ts = TaskStore(data_dir=data_dir) if data_dir else TaskStore()
     router = SquadRouter(is_, ts)
-    squad = Squad(id="sq-1", name="Frontend Team",
-                  leader_agent_id="agent-1",
-                  member_agent_ids=["agent-2", "agent-3"])
+    squad = Squad(
+        id="sq-1",
+        name="Frontend Team",
+        leader_agent_id="agent-lead",
+        instructions="Prefer accessibility fixes before visual polish.",
+        members=[
+            SquadMember("agent", "agent-lead", "leader", ["planning", "review"]),
+            SquadMember("agent", "agent-ui", "frontend", ["react", "css"]),
+            SquadMember("agent", "agent-test", "qa", ["playwright"]),
+        ],
+    )
     router.register(squad)
-    issue = is_.create("ws-1", "build landing page",
-                       assignee_type="agent", assignee_id="agent-1")
-    chosen = router.route(issue.id, "sq-1")
-    print(f"squad routed to: {chosen}")
-    tasks = ts.list(issue.id)
-    print(f"tasks: {len(tasks)}, assignee: {tasks[0].assignee_id if tasks else 'none'}")
-    return 0
 
+    print("=== s12 demo: squad leader lifecycle ===")
+    parent = is_.create("ws-1", "ship accessible landing page")
+    first_leader = router.assign_issue_to_squad(parent.id, "sq-1")
+    print(f"1) assign parent to squad: issue.assignee=squad:{parent.assignee_id}")
+    print(f"   leader wake: {_short_task(first_leader)}")
+    print("   briefing roster:")
+    for line in router.build_leader_briefing("sq-1").splitlines():
+        if line.startswith("- "):
+            print(f"     {line}")
+
+    # Leader 本轮只规划和派发,然后结束等待 worker / child 结果。
+    router.record_activity(parent.id, "sq-1", "agent-lead", "action", "created Stage 1 child issues")
+    ts.complete(first_leader.id)
+    stage1_ui = router.create_child_issue(parent.id, "Stage 1: implement hero", "agent", "agent-ui", stage=1)
+    stage1_test = router.create_child_issue(parent.id, "Stage 1: add smoke test", "agent", "agent-test", stage=1)
+    stage2_polish = router.create_child_issue(
+        parent.id,
+        "Stage 2: accessibility polish after smoke test",
+        "agent",
+        "agent-ui",
+        stage=2,
+        status=IssueStatus.BACKLOG,
+    )
+    print("2) leader creates Stage 1 children and stops")
+    for child in [stage1_ui, stage1_test, stage2_polish]:
+        print(f"   child stage={child.stage} status={child.status.value} assignee={child.assignee_id}: {child.title}")
+    _print_member_status(router, "sq-1")
+
+    _complete_issue_work(is_, ts, stage1_ui)
+    wake = router.notify_child_done(stage1_ui.id)
+    print("3) agent-ui completes first Stage 1 child")
+    print(f"   stage barrier: open, leader wake={_short_task(wake)}")
+
+    _complete_issue_work(is_, ts, stage1_test)
+    wake = router.notify_child_done(stage1_test.id)
+    print("4) agent-test completes second Stage 1 child")
+    print(f"   stage barrier: closed, leader wake={_short_task(wake)}")
+
+    if wake:
+        ts.complete(wake.id)
+        router.record_activity(parent.id, "sq-1", "agent-lead", "action", "reviewed Stage 1 and promoted Stage 2")
+        # 教学版把 Stage 2 从 backlog 推到 todo,再派发 worker task。
+        is_.transition(stage2_polish.id, IssueStatus.TODO)
+        ts.enqueue(
+            stage2_polish.id,
+            "agent",
+            stage2_polish.assignee_id,
+            squad_id="sq-1",
+            handoff_note="promoted Stage 2 after Stage 1 closed",
+        )
+    print("5) leader reviews Stage 1 results and promotes Stage 2")
+    print(f"   Stage 2 status={stage2_polish.status.value}, worker task={_short_task(ts.list(stage2_polish.id)[-1])}")
+    _print_member_status(router, "sq-1")
+
+    print("6) parent timeline comments:")
+    for comment in is_.get(parent.id).comments:
+        print(f"   - {comment}")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
