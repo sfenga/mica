@@ -2356,6 +2356,7 @@ async function selectObject(type, id){
   el('ins-json').textContent=JSON.stringify(data, null, 2);
   let rel='<h2 style="margin-top:8px">Related</h2>';
   if(type==='issue' && data){(data.tasks||[]).forEach(t=>rel+='<a onclick="selectObject(&#39;task&#39;,&#39;'+t.id+'&#39;)">task '+short(t.id)+' '+t.status+'</a>');(data.children||[]).forEach(c=>rel+='<a onclick="selectObject(&#39;issue&#39;,&#39;'+c.id+'&#39;)">child '+short(c.id)+' '+c.title+'</a>');}
+  if(type==='task' && data && data.id && data.issue_id) rel+='<a onclick="selectObject(&#39;issue&#39;,&#39;'+data.issue_id+'&#39;)">↩ issue '+short(data.issue_id)+'</a>';
   el('ins-rel').innerHTML=rel;
   if(type==='issue' && data){
     // issue 详情渲染到 Main 全宽(不在 Inspector)
@@ -2397,8 +2398,28 @@ async function selectObject(type, id){
     el('list').innerHTML=h;
     el('list-title').textContent='Issue Detail';
     watchIssue(id);
+  } else if(type==='task'){
+    // task 详情渲染到 Inspector 的 Detail 区(右侧)
+    let h='';
+    if(!data || !data.id){
+      h='<p class="empty" style="color:var(--err)">⛔ '+(data&&data.error?esc(data.error):'task not found')+'</p>';
+    } else {
+      h='<div class="detail">';
+      h+='<h3>Task '+short(data.id)+'</h3>';
+      h+='<div style="margin-bottom:8px">'+badge(data.status)+'</div>';
+      h+='<div style="margin-bottom:4px"><span class="k">issue</span> '+(data.issue_title?esc(data.issue_title):short(data.issue_id))+' <a onclick="selectObject(&#39;issue&#39;,&#39;'+data.issue_id+'&#39;)" style="color:var(--accent);cursor:pointer;font-weight:600">↩ open</a></div>';
+      h+='<div style="margin-bottom:4px"><span class="k">assignee</span> '+(data.assignee_type||'-')+':'+(data.assignee_id||'-')+'</div>';
+      h+='<div style="margin-bottom:4px"><span class="k">session</span> '+short(data.session_id)+'</div>';
+      if(data.workdir) h+='<div style="margin-bottom:4px"><span class="k">workdir</span> '+esc(data.workdir)+'</div>';
+      if(data.trigger_comment_id) h+='<div style="margin-bottom:4px"><span class="k">trigger</span> '+esc(data.trigger_comment_id)+'</div>';
+      if(data.error) h+='<div style="margin-bottom:4px;color:var(--err)"><span class="k">error</span> '+esc(data.error)+'</div>';
+      h+='<div style="margin-bottom:4px"><span class="k">events</span> '+((data.events||[]).length)+' session records</div>';
+      h+='</div>';
+    }
+    el('detail').innerHTML=h;
   } else {
-    // 非 issue 对象:Inspector 显示 JSON
+    // 其它对象:Inspector 显示 JSON,清空 Detail
+    el('detail').innerHTML='<p class="empty">select an object</p>';
     el('ins-json').textContent=JSON.stringify(data, null, 2);
   }
   if(type==='issue') renderTrace(data);
@@ -2683,6 +2704,29 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         if session_store is None:
             return []
         return session_store.load(task_id)
+
+    @app.get("/api/tasks/{task_id}")
+    def get_task(task_id: str):
+        task = task_store.get(task_id)
+        if task is None:
+            return {"error": f"task not found: {task_id}"}
+        d = _task_to_dict(task)
+        issue = issue_store.get(task.issue_id)
+        if issue:
+            d["issue_title"] = issue.title
+            d["issue_status"] = issue.status.value
+            # 解析 workdir(issue.project_id -> project.local_path)
+            workdir = ""
+            if issue.project_id and project_store is not None:
+                project = project_store.get(issue.project_id)
+                if project:
+                    workdir = project.local_path
+            d["workdir"] = workdir
+        if session_store is not None:
+            d["events"] = session_store.load(task_id)
+        else:
+            d["events"] = []
+        return d
 
     # --- Realtime ---
     @app.websocket("/ws/issues/{issue_id}")

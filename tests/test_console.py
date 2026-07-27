@@ -305,6 +305,42 @@ def test_list_tasks_filtered_by_workspace(tmp_path):
     assert len(ws2) == 1 and ws2[0]["issue_id"] == i2.id
 
 
+def test_get_task_detail(tmp_path):
+    """GET /api/tasks/{id} 返回 task + 所属 issue 标题 + workdir + events。"""
+    client, is_, ts, *_ = _client(tmp_path)
+    issue = is_.create("ws-1", "login bug", assignee_type="agent",
+                       assignee_id="agent-1")
+    task = ts.enqueue(issue.id, "agent", "agent-1")
+    res = client.get(f"/api/tasks/{task.id}").json()
+    assert res["id"] == task.id
+    assert res["issue_id"] == issue.id
+    assert res["issue_title"] == "login bug"
+    assert res["issue_status"] == "todo"
+    assert "events" in res
+    assert isinstance(res["events"], list)
+
+
+def test_get_task_with_workdir(tmp_path):
+    """task 详情解析 issue 关联 project 的 workdir。"""
+    client, is_, ts, *_ = _client(tmp_path)
+    proj = client.post("/api/projects", params={"name": "repo",
+                       "local_path": "/tmp/demo-repo"}).json()
+    issue = is_.create("ws-1", "x", assignee_type="agent",
+                      assignee_id="agent-1", project_id=proj["id"])
+    task = ts.enqueue(issue.id, "agent", "agent-1")
+    res = client.get(f"/api/tasks/{task.id}").json()
+    assert res["workdir"] == "/tmp/demo-repo"
+
+
+def test_get_task_not_found(tmp_path):
+    """不存在 task id 返回 error 而非 404 崩溃。"""
+    client, *_ = _client(tmp_path)
+    res = client.get("/api/tasks/does-not-exist").json()
+    assert "error" in res
+    assert "not found" in res["error"]
+
+
+
 def test_member_added_then_can_access_ws2(tmp_path):
     """端到端:add member 后 gate 放行。"""
     client, *_ = _client(tmp_path)
