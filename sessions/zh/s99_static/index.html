@@ -9,22 +9,50 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div id="app" v-scope class="h-screen flex flex-col bg-gray-50 text-gray-900">
-    <header class="h-14 bg-white border-b px-4 flex items-center gap-4">
-      <span class="font-bold text-indigo-600">◆ mica</span>
+  <div id="app" v-scope="App()" @vue:mounted="loadWorkspaces" class="h-screen flex flex-col bg-gray-50 text-gray-900">
+    <ToastContainer />
+    <header class="h-14 bg-white border-b px-4 flex items-center gap-4 shrink-0">
+      <span class="font-bold text-indigo-600 text-lg">◆ mica</span>
       <nav class="flex gap-1">
         <button v-for="t in tabs" :key="t.key"
                 @click="store.tab = t.key"
                 :class="store.tab === t.key ? 'bg-indigo-50 text-indigo-700' : 'text-gray-600 hover:bg-gray-100'"
-                class="px-3 py-1.5 rounded-md text-sm font-medium">
+                class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
           {{ t.label }}
         </button>
       </nav>
+      <div class="flex items-center gap-2 ml-4">
+        <select v-model="store.ws" class="border rounded-md px-2 py-1 text-xs bg-gray-50">
+          <option v-for="w in store.workspaces" :key="w.id" :value="w.id">{{ w.slug }} ({{ w.id }})</option>
+        </select>
+        <select v-model="store.member" class="border rounded-md px-2 py-1 text-xs bg-gray-50">
+          <option value="alice">alice</option>
+          <option value="bob">bob</option>
+        </select>
+      </div>
+      <div class="flex-1"></div>
+      <span class="text-xs text-gray-500 font-mono" :class="store.wsConn.connected ? 'text-emerald-600' : 'text-gray-400'">
+        {{ store.wsConn.connected ? '● live' : '○ offline' }}
+      </span>
     </header>
-    <main class="flex-1 overflow-auto p-4">
-      <h1 class="text-2xl font-semibold">{{ currentTabLabel }}</h1>
-      <p class="text-gray-500 mt-2">Mission Control dashboard loaded.</p>
+
+    <main class="flex-1 overflow-hidden">
+      <p class="p-8 text-gray-500">{{ currentTabLabel }} view will be mounted here.</p>
     </main>
+
+    <footer class="h-12 bg-white border-t px-4 flex items-center gap-3 shrink-0">
+      <button class="btn-primary" @click="startDaemon" :disabled="store.isLoading('daemon.start')">
+        <span v-if="store.isLoading('daemon.start')" class="inline-flex items-center gap-1"><Spinner /> Starting</span>
+        <span v-else>▶ Start daemon</span>
+      </button>
+      <button class="btn-secondary" @click="stopDaemon" :disabled="store.isLoading('daemon.stop')">■ Stop</button>
+      <button class="btn-secondary" @click="runDaemonOnce" :disabled="store.isLoading('daemon.run')">Run once</button>
+      <button class="btn-secondary" @click="autopilotTick" :disabled="store.isLoading('autopilot.tick')">⏰ Autopilot tick</button>
+      <button class="btn-secondary" @click="seedDemo" :disabled="store.isLoading('demo.seed')">📋 Seed</button>
+      <button class="btn-secondary" @click="resetDemo" :disabled="store.isLoading('demo.reset')">↺ Reset</button>
+      <div class="flex-1"></div>
+      <span class="text-xs text-gray-500">daemon: <b>{{ store.daemon.running ? 'running' : 'stopped' }}</b> · queued: {{ store.daemon.queued }}</span>
+    </footer>
   </div>
 </body>
 </html>
