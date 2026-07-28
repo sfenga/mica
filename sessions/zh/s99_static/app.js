@@ -2,6 +2,7 @@ import { createApp, reactive } from 'https://unpkg.com/petite-vue@0.4.1/dist/pet
 import { Badge, EmptyState, Spinner, ToastContainer, shortId, esc } from './components/common.js';
 import { BoardView, KanbanColumn, IssueCard, IssueDrawer } from './components/board.js';
 import { QueueView, TaskTable, TracePanel } from './components/queue.js';
+import { AgentsView, AgentForm, AgentCard } from './components/agents.js';
 
 export const store = reactive({
   tab: 'board',
@@ -192,5 +193,6 @@ createApp({
   Badge, EmptyState, Spinner, ToastContainer,
   BoardView, KanbanColumn, IssueCard, IssueDrawer,
   QueueView, TaskTable, TracePanel,
+  AgentsView, AgentForm, AgentCard,
   shortId, esc,
 }).mount('#app');
