@@ -57,7 +57,7 @@ const TaskTableTemplate = `
   <div>
     <div class="flex items-center gap-2 mb-3">
       <input v-model="filter" placeholder="Filter by status..." class="border rounded-md px-3 py-1.5 text-sm">
-      <button @click="store.tab = 'queue'" class="text-xs text-indigo-600 hover:underline">refresh</button>
+      <button @click="refresh" class="text-xs text-indigo-600 hover:underline">refresh</button>
     </div>
     <table class="min-w-full text-sm">
       <thead class="bg-gray-100 text-gray-600 font-medium">
@@ -95,6 +95,9 @@ export function TaskTable() {
     shortId,
     filter: '',
     selectTask(t) { store.selectedTaskId = t.id; },
+    async refresh() {
+      store.tasks = await api(`/api/tasks?workspace_id=${encodeURIComponent(store.ws)}`);
+    },
     get filteredTasks() {
       if (!this.filter) return store.tasks;
       return store.tasks.filter(t => t.status.includes(this.filter));
@@ -121,8 +124,8 @@ export function QueueView() {
     async load() {
       store.tasks = await api(`/api/tasks?workspace_id=${encodeURIComponent(store.ws)}`);
     },
-    mounted() { this.load(); this.interval = setInterval(() => this.load(), 3000); this.stopWatchWs = this.$watch ? this.$watch(() => store.ws, () => this.load()) : null; },
-    unmounted() { clearInterval(this.interval); if (this.stopWatchWs) this.stopWatchWs(); },
+    mounted() { this.load(); this.interval = setInterval(() => this.load(), 3000); this.lastWs = store.ws; this.watchInterval = setInterval(() => { if (store.ws !== this.lastWs) { this.lastWs = store.ws; this.load(); } }, 500); },
+    unmounted() { clearInterval(this.interval); clearInterval(this.watchInterval); },
     $template: QueueViewTemplate,
   };
 }

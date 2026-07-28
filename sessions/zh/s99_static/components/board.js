@@ -1,5 +1,5 @@
 import { store, api, apiPost, apiPatch, wsManager, toast } from '../app.js';
-import { Badge, shortId, esc, EmptyState } from './common.js';
+import { Badge, shortId, EmptyState } from './common.js';
 
 const STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'];
 
@@ -78,7 +78,7 @@ const IssueDrawerTemplate = `
           task {{ shortId(t.id) }} → {{ t.status }}
         </div>
         <div v-for="(c, idx) in issue.comments || []" :key="issue.id + '-' + idx" class="text-sm bg-gray-50 rounded-lg p-3 mb-2" :class="c.startsWith('[agent') ? 'border-l-4 border-indigo-400' : 'border-l-4 border-blue-400'">
-          {{ esc(c) }}
+          {{ c }}
         </div>
       </div>
 
@@ -96,7 +96,6 @@ export function IssueDrawer() {
     store,
     Badge,
     shortId,
-    esc,
     get issue() { return store.issues.find(i => i.id === store.selectedIssueId); },
     close() { store.selectedIssueId = null; wsManager.disconnect(); },
     async transition(status) {
@@ -207,13 +206,19 @@ export function BoardView() {
     mounted() {
       this.load();
       this.interval = setInterval(() => this.load(), 3000);
-      this.stopWatchWs = this.$watch ? this.$watch(() => store.ws, () => this.load()) : null;
-      this.stopWatchMember = this.$watch ? this.$watch(() => store.member, () => this.load()) : null;
+      this.lastWs = store.ws;
+      this.lastMember = store.member;
+      this.watchInterval = setInterval(() => {
+        if (store.ws !== this.lastWs || store.member !== this.lastMember) {
+          this.lastWs = store.ws;
+          this.lastMember = store.member;
+          this.load();
+        }
+      }, 500);
     },
     unmounted() {
       clearInterval(this.interval);
-      if (this.stopWatchWs) this.stopWatchWs();
-      if (this.stopWatchMember) this.stopWatchMember();
+      clearInterval(this.watchInterval);
     },
     $template: BoardViewTemplate,
   };
