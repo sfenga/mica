@@ -1,14 +1,11 @@
-"""s08 — markdown 技能注入
+"""s08 — markdown skill 文件加载
 
 在 s07(FastAPI 单页看板)之上叠加:
 - Skill dataclass + SkillLoader:扫 workspace/skills/**/SKILL.md,解析 frontmatter
-  (---name/description/keywords---),用 keywords 关键词子串匹配 issue.title+body,首个命中即选中。
-  无 keywords 字段的不自动选中;空目录返回空列表。
-- ClaudeCliRunner.run 加 append_system_prompt 参数,透传给 _cmd(拼 --append-system-prompt)。
-- AgentRunner Protocol + StubRunner 同步加 append_system_prompt(StubRunner 忽略)。
-- Daemon(..., skill_loader=None):execute 里若 skill_loader 已注入,先 select(issue)
-  得到 skill,把 skill.body 当 append_system_prompt 透传给 runner.run。
-- main():用 StubRunner + 示例 skill,演示技能被选中 + daemon 执行。
+  (---name/description---)和 markdown 正文;空目录返回空列表。
+- SkillLoader.get(name):按 skill name 读取技能,大小写不敏感。
+- SkillLoader 不读取 Issue,也不根据 issue.title/body 决定任务该用哪个 skill。
+- main():用 StubRunner + 示例 skill,演示技能文件被加载并可按名读取。
 """
 import asyncio
 import glob
@@ -76,21 +73,20 @@ class RealtimeHub:
 
 
 # ===========================================================================
-# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
+# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,按 name 读取)
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
-    keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
     body: str = ""         # markdown 正文(skill 内容)
     path: str = ""         # SKILL.md 文件路径
 
 
 class SkillLoader:
-    """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
+    """扫 workspace/skills/**/SKILL.md,加载可按 name 取用的技能。
 
-    扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
+    扫描顺序:sorted glob(recursive)。SkillLoader 不读取 issue,也不决定任务该用哪个 skill。
     """
 
     def __init__(self, skills_dir: str):
@@ -108,7 +104,7 @@ class SkillLoader:
                 self._skills.append(skill)
 
     def _parse(self, path: str) -> Skill | None:
-        """解析 SKILL.md:---name/description/keywords--- + 正文。"""
+        """解析 SKILL.md:---name/description--- + 正文。"""
         with open(path, encoding="utf-8") as f:
             content = f.read()
         # 解析 frontmatter(--- 之间的 key: value)
@@ -127,19 +123,19 @@ class SkillLoader:
         return Skill(
             name=fields.get("name", ""),
             description=fields.get("description", ""),
-            keywords=fields.get("keywords", ""),
             body=body,
             path=path,
         )
 
-    def select(self, issue) -> Skill | None:
-        """用 keywords 关键词子串匹配 issue.title+body,取首个命中。无 keywords 字段的不选。"""
-        text = issue.title + "\n" + (issue.body or "")
+
+    def get(self, name: str) -> Skill | None:
+        """按 name 查找技能(大小写不敏感)。"""
+        if not name:
+            return None
+        target = name.strip().lower()
         for skill in self._skills:
-            if skill.keywords:
-                for kw in skill.keywords.split(","):
-                    if kw.strip().lower() in text:
-                        return skill
+            if skill.name.strip().lower() == target:
+                return skill
         return None
 
     def list(self) -> list[Skill]:
@@ -691,12 +687,8 @@ class Daemon:
         self._record(task.id, {"type": "claim", "task_id": task.id,
                                "issue_id": task.issue_id,
                                "agent_id": self.agent.id})
-        skill = None
-        if self.skill_loader:
-            skill = self.skill_loader.select(issue)
         result = self.runner.run(task, issue, [], on_event,
-                                 resume_session_id=prior_sid or None,
-                                 skill_body=skill.body if skill else None)
+                                 resume_session_id=prior_sid or None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
             self.task_store.set_session_id(task.id, result["session_id"])
@@ -1120,7 +1112,6 @@ def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub)
 EXAMPLE_SKILL_MD = """---
 name: code-review
 description: 审查代码变更,关注安全/正确性/可维护性
-keywords: review, 审查, PR, code review
 ---
 
 You are reviewing code. Focus on:
@@ -1146,12 +1137,12 @@ def main(data_dir: str = "./workspace") -> int:
     agent = Agent(id="agent-1", name="Claude")
     daemon = Daemon(issue_store, task_store, agent, StubRunner(),
                     session_store=sessions, hub=hub, skill_loader=skill_loader)
-    # 创建一条命中 review 技能的 issue
+    # 创建 issue 并执行;skill 是否注入不由 Issue 决定。
     issue = issue_store.create("ws-1", "review the auth module",
                                assignee_type="agent", assignee_id="agent-1")
     task_store.enqueue(issue.id, "agent", "agent-1")
-    skill = skill_loader.select(issue)
-    print(f"selected skill: {skill.name if skill else 'none'}")
+    skill = skill_loader.get("code-review")
+    print(f"loaded skill: {skill.name if skill else 'none'}")
     daemon.run_once()
     print(render_board(issue_store.list()))
     return 0

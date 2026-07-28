@@ -150,15 +150,12 @@ def test_autopilot_tick(tmp_path):
     assert any(i.title == "daily check" for i in issues)
 
 
-def test_skills_preview(tmp_path):
+def test_skill_get_by_name(tmp_path):
     client, *_ = _client(tmp_path)
-    res = client.post(
-        "/api/skills/preview",
-        params={"title": "review the auth module", "body": ""},
-    )
+    res = client.get("/api/skills/code-review")
     data = res.json()
-    assert data["matched"]["name"] == "code-review"
-    assert "You are reviewing code" in data["injected_prompt"]
+    assert data["skill"]["name"] == "code-review"
+    assert "You are reviewing code" in data["skill"]["body"]
 
 
 def test_squad_worker_report(tmp_path):

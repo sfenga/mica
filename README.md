@@ -16,7 +16,7 @@ issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude
 | s05 | 评论建新 task + `--resume` 上一 task |
 | s06 | WebSocket 实时进度 |
 | s07 | FastAPI 单页看板 + 创建/转移/评论 |
-| s08 | markdown 技能注入(`keywords` 关键词召回) |
+| s08 | markdown skill 文件加载(`SkillLoader` + `SKILL.md`) |
 | s09 | cron autopilot |
 | s10 | 多 CLI + PATH 探测(1 daemon : N agent) |
 | s11 | 多 workspace 隔离 + 成员资格 |

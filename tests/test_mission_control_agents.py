@@ -161,11 +161,10 @@ def test_daemon_injects_agent_system_prompt(tmp_path):
 
 
 def test_daemon_injects_bound_skill(tmp_path):
-    """agent 绑 code-review -> skill_body 含 code-review(且 issue 也匹配 -> 去重一份)。"""
+    """agent 绑 code-review -> skill_body 含 code-review;Issue 文本不参与选择。"""
     runner = _RecordingRunner()
     client, is_, ts, ag, _ = _client(tmp_path, runner=runner)
     ag.create("agent-fe", "FE", skill_names=["code-review"])
-    # issue title 含 review -> 也匹配 code-review -> 合并去重一份
     issue = is_.create("ws-1", "review the auth", assignee_type="agent",
                        assignee_id="agent-fe")
     ts.enqueue(issue.id, "agent", "agent-fe")
@@ -174,8 +173,8 @@ def test_daemon_injects_bound_skill(tmp_path):
     assert (call["skill_body"] or "").count("## Skill: code-review") == 1
 
 
-def test_daemon_compat_unconfigured_agent(tmp_path):
-    """assignee 不在 AgentStore(派生 agent) -> 无 system_prompt,只 issue 匹配 skill。"""
+def test_daemon_unconfigured_agent_has_no_skill_context(tmp_path):
+    """assignee 不在 AgentStore(派生 agent) -> 无 system_prompt,无 skill_body。"""
     runner = _RecordingRunner()
     client, is_, ts, _, _ = _client(tmp_path, runner=runner)
     issue = is_.create("ws-1", "review the auth", assignee_type="agent",
@@ -184,4 +183,4 @@ def test_daemon_compat_unconfigured_agent(tmp_path):
     client.post("/api/daemon/run-once")
     call = runner.calls[-1]
     assert call["append_system_prompt"] is None
-    assert "## Skill: code-review" in (call["skill_body"] or "")
+    assert call["skill_body"] is None

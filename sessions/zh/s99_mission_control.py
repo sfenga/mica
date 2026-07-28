@@ -3,9 +3,8 @@
 本文件是 s01-s14 的累积教学代码,也是最终观察控制台。s99 集成 s14 的 Agent Profile:
 
 - Agent 增加 system_prompt / skill_names;AgentStore 持久化(agents.jsonl);
-- SkillLoader 使用 keywords 关键词召回,新增 get(name);
-- Daemon.execute 按 task.assignee_id 查 agent,注入 system_prompt + 绑定 skill +
-  issue 匹配 skill(两层去重);
+- SkillLoader 负责从 workspace/skills 读取 SKILL.md,并提供 get(name);
+- Daemon.execute 按 task.assignee_id 查 agent,注入 system_prompt + agent.skill_names 对应的 skill;
 - API:GET/POST/PATCH /api/agents、/api/agents/{id}/skills 绑定/解绑;
   GET /api/agents 在 AgentStore 为空时回退 runtime.clis 派生(兼容);
 - Mission Control 暴露 Agent Profile:创建 agent、编辑 system_prompt、多选绑 skill;
@@ -122,23 +121,21 @@ class RealtimeHub:
 
 
 # ===========================================================================
-# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
-# s99:使用 keywords 关键词召回,新增 get(name) 供 agent 绑定解析。
+# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,按 name 读取)
+# s99:使用 get(name) 供 agent 绑定解析;Issue 不参与 skill 选择。
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
-    keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
     body: str = ""         # markdown 正文(skill 内容)
     path: str = ""         # SKILL.md 文件路径
 
 
 class SkillLoader:
-    """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
+    """扫 workspace/skills/**/SKILL.md,加载可按 name 取用的技能。
 
-    扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
-    s99 新增 get(name):按 name 查找(大小写不敏感),供 agent 绑定解析。
+    s99 使用 get(name) 按 agent.skill_names 解析绑定技能;Issue 不参与 skill 选择。
     """
 
     def __init__(self, skills_dir: str):
@@ -156,7 +153,7 @@ class SkillLoader:
                 self._skills.append(skill)
 
     def _parse(self, path: str) -> Skill | None:
-        """解析 SKILL.md:---name/description/keywords--- + 正文。"""
+        """解析 SKILL.md:---name/description--- + 正文。"""
         with open(path, encoding="utf-8") as f:
             content = f.read()
         # 解析 frontmatter(--- 之间的 key: value)
@@ -175,20 +172,10 @@ class SkillLoader:
         return Skill(
             name=fields.get("name", ""),
             description=fields.get("description", ""),
-            keywords=fields.get("keywords", ""),
             body=body,
             path=path,
         )
 
-    def select(self, issue) -> Skill | None:
-        """用 keywords 关键词子串匹配 issue.title+body,取首个命中。无 keywords 字段的不选。"""
-        text = (issue.title + "\n" + (issue.body or "")).lower()
-        for skill in self._skills:
-            if skill.keywords:
-                for kw in skill.keywords.split(","):
-                    if kw.strip().lower() in text:
-                        return skill
-        return None
 
     def get(self, name: str) -> Skill | None:
         """按 name 查找技能(大小写不敏感)。供 agent.skill_names 绑定解析。"""
@@ -349,15 +336,15 @@ class AgentStore:
             return agent
 
 
-def merge_skills(bound: list[Skill], matched: "Skill | None") -> str:
-    """合并 agent 绑定 skill + issue 自动匹配 skill,按 name 去重。
+def merge_skills(skills: list[Skill]) -> str:
+    """渲染 agent 绑定的 skills,按 name 去重。
 
-    每个 skill 拼 '## Skill: {name}\\n{body}',空行分隔。全空返回 ""。
-    不同 agent 的绑定 skill 互相隔离(各自的 skill_names 决定 bound)。
+    每个 skill 拼 '## Skill: {name}\n{body}',空行分隔。全空返回 ""。
+    不同 agent 的 skill_body 只由各自的 skill_names 决定。
     """
     seen: set[str] = set()
     parts: list[str] = []
-    for skill in list(bound) + ([matched] if matched else []):
+    for skill in list(skills):
         if skill is None:
             continue
         key = skill.name.strip().lower()
@@ -366,7 +353,6 @@ def merge_skills(bound: list[Skill], matched: "Skill | None") -> str:
         seen.add(key)
         parts.append(f"## Skill: {skill.name}\n{skill.body}")
     return "\n\n".join(parts)
-
 
 @dataclass
 class Member:
@@ -1048,7 +1034,7 @@ class Daemon:
         self.skill_loader = skill_loader
         self.project_store = project_store
         # s14/s99:agent_store 让 daemon 按 task.assignee_id 查 agent 配置
-        # (system_prompt + 绑定 skill)。None 时兼容旧逻辑(只 issue 匹配 skill)。
+        # (system_prompt + 绑定 skill)。Issue 不直接绑定或选择 skill。
         self.agent_store = agent_store
         self._stop = False
 
@@ -1124,9 +1110,7 @@ class Daemon:
         if agent and self.skill_loader:
             bound = [self.skill_loader.get(n) for n in agent.skill_names]
             bound = [s for s in bound if s is not None]
-        # issue 自动匹配 skill(临时补充,与 agent 绑定 skill 合并去重)。
-        matched = self.skill_loader.select(issue) if self.skill_loader else None
-        skill_body = merge_skills(bound, matched)
+        skill_body = merge_skills(bound)
         result = self.runner.run(task, issue, [], on_event,
                                  resume_session_id=prior_sid or None,
                                  append_system_prompt=system_prompt or None,
@@ -1563,7 +1547,6 @@ def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub)
 EXAMPLE_SKILL_MD = """---
 name: code-review
 description: 审查代码变更,关注安全/正确性/可维护性
-keywords: review, 审查, PR, code review
 ---
 
 You are reviewing code. Focus on:
@@ -1839,7 +1822,7 @@ class SquadRouter:
         return self._enqueue_leader(issue, squad, handoff_note=handoff_note)
 
     def route(self, issue_id: str, squad_id: str) -> str | None:
-        """向后兼容旧 s12 名称:route 现在表示 route to leader。"""
+        """提供 route 别名:语义等同于 route_to_leader。"""
         task = self.assign_issue_to_squad(issue_id, squad_id)
         return task.assignee_id if task else None
 
@@ -2163,7 +2146,6 @@ def _skill_to_dict(s: "Skill") -> dict:
     return {
         "name": s.name,
         "description": s.description,
-        "keywords": s.keywords,
         "path": s.path,
         "body": (s.body or "")[:200],
     }
@@ -2464,8 +2446,8 @@ async function loadView(v){
     if(auto) loadTrace(state.selId);
   } else if(state.view==='skills'){
     const d=await api('/api/skills');
-    let h='<form class="inline" onsubmit="previewSkill(event)"><input name="title" placeholder="issue title"><input name="body" placeholder="body"><button class="btn primary">Preview</button></form>';
-    d.forEach(s=>{h+='<div style="border:1px solid var(--border);padding:8px;margin-bottom:8px;border-radius:4px"><b style="color:var(--accent)">'+s.name+'</b> — '+s.description+'<br><small style="color:var(--muted)">'+(s.keywords||[]).join(', ')+' · '+s.path+'</small><pre style="overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto">'+s.body+'</pre></div>';});
+    let h='';
+    d.forEach(s=>{h+='<div style="border:1px solid var(--border);padding:8px;margin-bottom:8px;border-radius:4px"><b style="color:var(--accent)">'+s.name+'</b> — '+s.description+'<br><small style="color:var(--muted)">agent.skill_names 绑定名: '+s.name+' · '+s.path+'</small><pre style="overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto">'+s.body+'</pre></div>';});
     list.innerHTML=h||'<p class="empty">no skills</p>';
   } else if(state.view==='autopilot'){
     const d=await api('/api/autopilots');
@@ -2680,7 +2662,6 @@ async function unbindAgentSkill(id,name){await fetch('/api/agents/'+id+'/skills/
 async function updateAgentPrompt(id){const ta=el('sp-'+id);if(!ta)return;try{const r=await fetch('/api/agents/'+id+'?system_prompt='+encodeURIComponent(ta.value),{method:'PATCH'});const d=await r.json();if(d&&d.error){setStatus('save failed: '+d.error,'var(--err)');return;}setStatus('agent prompt saved','var(--ok)');}catch(err){setStatus('save failed: '+err.message,'var(--err)');}}
 async function createAutopilot(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/autopilots?'+new URLSearchParams({cron:f.get('cron'),agent_id:f.get('agent_id'),title:f.get('title')}),{method:'POST'});loadView();}
 async function createSquad(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/squads?'+new URLSearchParams({name:f.get('name'),leader_agent_id:f.get('leader_agent_id'),member_agent_ids:f.get('member_agent_ids')}),{method:'POST'});loadView();}
-async function previewSkill(e){e.preventDefault();const f=new FormData(e.target);const d=await fetch('/api/skills/preview?'+new URLSearchParams({title:f.get('title')||'',body:f.get('body')||''}),{method:'POST'}).then(r=>r.json());alert('Matched: '+(d.matched?d.matched.name:'none')+'\\n\\n'+(d.injected_prompt||''));}
 async function addMember(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/workspaces/'+state.ws+'/members?member_id='+encodeURIComponent(f.get('member_id')),{method:'POST'});loadView();}
 async function addComment(e,id){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues/'+id+'/comments?text='+encodeURIComponent(f.get('text')||''),{method:'POST'});selectObject('issue',id);}
 async function transitionIssue(id,status){try{await fetch('/api/issues/'+id+'/status?status='+status,{method:'PATCH'});loadView();selectObject('issue',id);}catch(e){setStatus('error: '+e.message,'var(--err)');}}
@@ -2987,19 +2968,14 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             return []
         return [_skill_to_dict(s) for s in skill_loader.list()]
 
-    @app.post("/api/skills/preview")
-    def skills_preview(title: str = "", body: str = ""):
+    @app.get("/api/skills/{name}")
+    def get_skill(name: str):
         if skill_loader is None:
-            return {"matched": None, "injected_prompt": "",
-                    "reason": "no skill loader configured"}
-        # 构造一个临时 issue 用于 select
-        tmp = Issue(id="preview", workspace_id="ws-1", title=title, body=body)
-        skill = skill_loader.select(tmp)
+            return {"skill": None, "reason": "no skill loader configured"}
+        skill = skill_loader.get(name)
         if skill is None:
-            return {"matched": None, "injected_prompt": title + "\n\n" + (body or ""),
-                    "reason": "no skill matched"}
-        injected = title + (f"\n\n{body}" if body else "") + "\n\n[Skill]\n" + skill.body
-        return {"matched": _skill_to_dict(skill), "injected_prompt": injected}
+            return {"skill": None, "reason": "skill not found"}
+        return {"skill": _skill_to_dict(skill)}
 
     # --- Autopilot ---
     @app.get("/api/autopilots")
@@ -3267,7 +3243,7 @@ def main(data_dir: str = "./workspace") -> int:
     skills_dir = os.path.join(data_dir, "skills", "code-review")
     os.makedirs(skills_dir, exist_ok=True)
     skill_md = os.path.join(skills_dir, "SKILL.md")
-    # 强制覆写示例 skill,保证 demo 使用当前 keywords frontmatter
+    # 强制覆写示例 skill,保证 demo 使用当前 name/description frontmatter
     with open(skill_md, "w", encoding="utf-8") as f:
         f.write(EXAMPLE_SKILL_MD)
     skill_loader = SkillLoader(os.path.join(data_dir, "skills"))

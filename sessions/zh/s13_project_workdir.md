@@ -318,7 +318,7 @@ pyproject.toml
 
 如果 cwd 错了,agent 不只是“看不到代码”,还可能读不到项目级 instructions 和技能配置。s13 把 cwd 传给 subprocess,就是为了让 CLI 的项目发现逻辑从目标 project 开始,而不是从 daemon 启动目录开始。
 
-教学版没有把 s08 的 markdown skills 写入 workdir,也没有生成 AGENTS.md。s13 仍沿用 s08 的 `keywords` 关键词召回:SkillLoader 先读取 `SKILL.md` frontmatter,再用关键词匹配 issue title/body。它只完成最底层的 cwd 传递。完整系统会在 workdir 里写入 issue context、技能文件、runtime marker、sidecar manifest 等辅助文件,并在 local directory 模式结束时清理这些 sidecar。
+教学版没有把 s08 的 markdown skills 写入 workdir,也没有生成 AGENTS.md。s13 只完成最底层的 cwd 传递:daemon 根据 issue.project_id 找到 project.local_path,再把它作为 runner 的 cwd。后续 s14 会通过 Agent.skill_names 决定执行时加载哪些 skill。完整系统会在 workdir 里写入 issue context、技能文件、runtime marker、sidecar manifest 等辅助文件,并在 local directory 模式结束时清理这些 sidecar。
 
 ## 12. 和 multiCa 的对应关系
 

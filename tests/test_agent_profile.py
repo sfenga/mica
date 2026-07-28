@@ -5,9 +5,9 @@
 - SkillLoader.get(name) 命中/未命中
 - merge_skills 按 name 去重
 - daemon 注入 append_system_prompt(agent.system_prompt)
-- daemon 注入绑定 skill + issue 匹配 skill(两层,去重)
+- daemon 只注入 agent.skill_names 绑定的 skill
 - 不同 agent 的 skill 不互相泄漏
-- agent_store=None 兼容旧逻辑(只 issue 匹配,无 system_prompt)
+- agent_store=None 时无 system_prompt、无 skill_body
 """
 import os
 
@@ -25,10 +25,10 @@ from sessions.zh.s14_agents import (
 )
 
 
-def _write_skill(dirpath, name, keywords, body):
+def _write_skill(dirpath, name, body):
     os.makedirs(dirpath, exist_ok=True)
     with open(os.path.join(dirpath, "SKILL.md"), "w", encoding="utf-8") as f:
-        f.write(f"---\nname: {name}\ndescription: d\nkeywords: {keywords}\n---\n{body}")
+        f.write(f"---\nname: {name}\ndescription: d\n---\n{body}")
 
 
 def _stores(tmp_path):
@@ -87,22 +87,18 @@ def test_agent_store_persistence_reload(tmp_path):
 # --- SkillLoader.get ---
 
 def test_skill_loader_get(tmp_path):
-    _write_skill(str(tmp_path / "react"), "react", "react, jsx", "react body")
+    _write_skill(str(tmp_path / "react"), "react", "react body")
     sl = SkillLoader(str(tmp_path))
     assert sl.get("react").body == "react body"
     assert sl.get("REACT").name == "react"   # 大小写不敏感
     assert sl.get("nope") is None
 
 
-def test_skill_loader_select_case_insensitive(tmp_path):
-    """keyword lower,text 也 lower:大写 issue 文本能匹配小写关键词。"""
-    _write_skill(str(tmp_path / "review"), "code-review", "review, 审查",
-                 "review body")
+def test_skill_loader_get_missing_returns_none(tmp_path):
+    _write_skill(str(tmp_path / "review"), "code-review", "review body")
     sl = SkillLoader(str(tmp_path))
-    # title 全大写 REVIEW 应命中 keyword review
-    issue = Issue(id="x", workspace_id="ws-1", title="REVIEW the auth module")
-    assert sl.select(issue) is not None
-    assert sl.select(issue).name == "code-review"
+    assert sl.get("code-review").body == "review body"
+    assert sl.get("review the auth module") is None
 
 
 # --- merge_skills ---
@@ -111,14 +107,14 @@ def test_merge_skills_dedup():
     react = Skill(name="react", description="d", body="react body")
     review = Skill(name="code-review", description="d", body="review body")
     # bound=[react], matched=review -> both, distinct names
-    out = merge_skills([react], review)
+    out = merge_skills([react, review])
     assert "## Skill: react" in out
     assert "## Skill: code-review" in out
     # same name -> only once
-    out2 = merge_skills([react], react)
+    out2 = merge_skills([react, react])
     assert out2.count("## Skill: react") == 1
     # empty
-    assert merge_skills([], None) == ""
+    assert merge_skills([]) == ""
 
 
 # --- daemon injection ---
@@ -129,10 +125,9 @@ def _wire(tmp_path, runner, with_agent_store=True, skills=("react", "code-review
     ts = TaskStore()
     skills_dir = str(tmp_path / "skills")
     if "react" in skills:
-        _write_skill(skills_dir + "/react", "react", "react, jsx", "react body")
+        _write_skill(skills_dir + "/react", "react", "react body")
     if "code-review" in skills:
-        _write_skill(skills_dir + "/code-review", "code-review", "review, 审查",
-                     "review body")
+        _write_skill(skills_dir + "/code-review", "code-review", "review body")
     sl = SkillLoader(skills_dir)
     ag = AgentStore() if with_agent_store else None
     daemon = Daemon(is_, ts, runner, skill_loader=sl, agent_store=ag)
@@ -162,17 +157,17 @@ def test_daemon_injects_bound_skill(tmp_path):
     assert call["append_system_prompt"] is None   # no system_prompt set
 
 
-def test_daemon_merges_bound_and_matched_dedup(tmp_path):
-    """agent 绑定 react + issue 匹配 code-review -> 两个;同名只一份。"""
+def test_daemon_ignores_issue_text_for_skill_selection(tmp_path):
+    """Issue title/body 不会触发 skill;只有 agent.skill_names 会注入。"""
     runner = RecordingRunner()
     is_, ts, ag, _, daemon = _wire(tmp_path, runner)
-    # agent 绑定 code-review,issue 又匹配 code-review(关键词 review) -> 只一份
-    ag.create("agent-fe", "FE", skill_names=["code-review"])
+    ag.create("agent-fe", "FE", skill_names=["react"])
     issue = is_.create("ws-1", "review the auth", assignee_type="agent", assignee_id="agent-fe")
     ts.enqueue(issue.id, "agent", "agent-fe")
     daemon.run_once()
     call = runner.calls[-1]
-    assert (call["skill_body"] or "").count("## Skill: code-review") == 1
+    assert "## Skill: react" in (call["skill_body"] or "")
+    assert "## Skill: code-review" not in (call["skill_body"] or "")
 
 
 def test_agent_skills_isolated(tmp_path):
@@ -194,8 +189,8 @@ def test_agent_skills_isolated(tmp_path):
     assert "## Skill: code-review" in (call_b["skill_body"] or "")
 
 
-def test_daemon_compat_no_agent_store(tmp_path):
-    """agent_store=None:兼容旧逻辑 —— 无 system_prompt,只 issue 匹配 skill。"""
+def test_daemon_no_agent_store_has_no_agent_skill_context(tmp_path):
+    """agent_store=None:无法按 assignee_id 找 Agent,因此不注入 system_prompt 或 skill_body。"""
     runner = RecordingRunner()
     is_, ts, _, _, daemon = _wire(tmp_path, runner, with_agent_store=False)
     issue = is_.create("ws-1", "review the auth", assignee_type="agent", assignee_id="agent-1")
@@ -203,5 +198,4 @@ def test_daemon_compat_no_agent_store(tmp_path):
     daemon.run_once()
     call = runner.calls[-1]
     assert call["append_system_prompt"] is None
-    # issue 匹配 code-review(关键词 review)
-    assert "## Skill: code-review" in (call["skill_body"] or "")
+    assert call["skill_body"] is None

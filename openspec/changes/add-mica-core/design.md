@@ -25,7 +25,7 @@ Member  : id, name
 Runtime : id, name, clis[]
 Workspace : id, slug, name
 Session : task_id -> JSONL of events(claim/progress/token/done/fail)   # s04 起
-Skill     : 磁盘 markdown,带 frontmatter(name/description/keywords 关键词),技能正文拼入 user prompt
+Skill     : 磁盘 markdown,带 frontmatter(name/description),由 Agent.skill_names 显式绑定后注入 runner
 Autopilot : id, cron, agent_id, title, template, next_run, fail_count, enabled, timezone?
 Membership: workspace_id -> [member_id]
 ```
@@ -85,8 +85,8 @@ daemon 侧 `RealtimeHub`(s06)维护 task/issue→订阅者,`on_event` 推 JSON �
 ### D8: web 面板零构建
 s07 FastAPI 单页 HTML(内联 JS、无构建)+ WS 端点;issue 行表 + 创建表单 + 行内状态转移 + 评论框 + 选中行实时进度。
 
-### D9: 技能 = markdown(frontmatter.keywords 关键词)注入 user prompt
-`SkillLoader`(s08)扫 `workspace/skills/**/SKILL.md`,frontmatter `keywords` 关键词子串匹配 issue.title+body,取首个命中,技能正文拼入 user prompt。换文件不改代码即生效。
+### D9: 技能 = markdown 文件 + agent 显式绑定
+`SkillLoader`(s08)扫 `workspace/skills/**/SKILL.md`,解析 frontmatter `name`/`description` 和正文;`Agent.skill_names` 声明 agent 绑定哪些 skill;`Daemon.execute` 按 `task.assignee_id` 查 Agent,再按绑定名加载 skill 并注入 runner。Issue 不直接绑定 skill。
 
 ### D10: autopilot = cron 建 issue + 入队 task
 `Scheduler`(s09)croniter 解析 cron,到期建 issue(指派 agent)+ 入队 task,进正常认领。next_run 无论成败推进并落盘;连续失败禁用;重启不重触发。

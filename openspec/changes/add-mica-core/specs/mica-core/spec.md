@@ -152,17 +152,17 @@
 - **WHEN** 在页面给 `in_review` issue 提交评论
 - **THEN** `POST /comments` 入队新 `queued` task,issue 状态不变
 
-### Requirement: Markdown 技能注入
+### Requirement: Markdown 技能加载与 agent 绑定
 
-系统 SHALL 把 `workspace/skills/**/SKILL.md` 下带 frontmatter 的 markdown 视为技能;frontmatter 字段 SHALL 含 `name`、`description`、`keywords`(逗号分隔关键词,子串匹配 `issue.title` + `issue.body`)。`SkillLoader` SHALL 扫描技能目录,对每条技能用 `keywords` 关键词子串匹配 issue 的 title+body,取第一个命中的技能;无 `keywords` 字段的技能永不被自动选中;选中后技能正文 SHALL 拼入 user prompt(不进 `--append-system-prompt`)。换技能文件 SHALL 不改代码即生效。
+系统 SHALL 把 `workspace/skills/**/SKILL.md` 下带 frontmatter 的 markdown 视为技能;frontmatter 字段 SHALL 含 `name`、`description`。`SkillLoader` SHALL 扫描技能目录,提供 `list()` 和大小写不敏感的 `get(name)`。`Agent.skill_names` SHALL 声明 agent 绑定哪些 skill;`Daemon.execute` SHALL 按 `task.assignee_id` 查 Agent,再按 `Agent.skill_names` 加载 skills 并注入 runner。Issue SHALL NOT 直接绑定 skill,也 SHALL NOT 根据 title/body 自动选择 skill。
 
-#### Scenario: 按 keywords 关键词选中技能
-- **WHEN** skill `keywords: "fix,bug"` 且 issue.title 含关键词 "fix" 或 "bug"
-- **THEN** `SkillLoader` 选中它,技能正文拼入 user prompt
+#### Scenario: 按 Agent.skill_names 加载技能
+- **WHEN** agent `agent-fe` 的 `skill_names` 包含 `react`
+- **THEN** daemon 执行派给 `agent-fe` 的 task 时 SHALL 加载 `react` skill 并注入 runner
 
-#### Scenario: 无匹配技能照常执行
-- **WHEN** issue 不命中任何技能的 `keywords`
-- **THEN** runner 不带技能正文,照常执行
+#### Scenario: Issue 文本不触发技能选择
+- **WHEN** issue.title 包含某个 skill 名或描述,但 assignee agent 未绑定该 skill
+- **THEN** daemon SHALL 正常执行且不注入该 skill
 
 ### Requirement: Cron Autopilot
 

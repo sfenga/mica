@@ -131,21 +131,20 @@ class RealtimeHub:
 
 
 # ===========================================================================
-# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
+# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,按 name 读取)
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
-    keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
     body: str = ""      # markdown 正文(skill 内容)
     path: str = ""      # SKILL.md 文件路径
 
 
 class SkillLoader:
-    """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
+    """扫 workspace/skills/**/SKILL.md,加载可按 name 取用的技能。
 
-    扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
+    扫描顺序:sorted glob(recursive)。SkillLoader 不读取 issue,也不决定任务该用哪个 skill。
     """
 
     def __init__(self, skills_dir: str):
@@ -163,7 +162,7 @@ class SkillLoader:
                 self._skills.append(skill)
 
     def _parse(self, path: str) -> Skill | None:
-        """解析 SKILL.md:---name/description/keywords--- + 正文。"""
+        """解析 SKILL.md:---name/description--- + 正文。"""
         with open(path, encoding="utf-8") as f:
             content = f.read()
         # 解析 frontmatter(--- 之间的 key: value)
@@ -182,19 +181,19 @@ class SkillLoader:
         return Skill(
             name=fields.get("name", ""),
             description=fields.get("description", ""),
-            keywords=fields.get("keywords", ""),
             body=body,
             path=path,
         )
 
-    def select(self, issue) -> Skill | None:
-        """用 keywords 关键词子串匹配 issue.title+body,取首个命中。无 keywords 字段的不选。"""
-        text = (issue.title + "\n" + (issue.body or "")).lower()
+
+    def get(self, name: str) -> Skill | None:
+        """按 name 查找技能(大小写不敏感)。"""
+        if not name:
+            return None
+        target = name.strip().lower()
         for skill in self._skills:
-            if skill.keywords:
-                for kw in skill.keywords.split(","):
-                    if kw.strip().lower() in text:
-                        return skill
+            if skill.name.strip().lower() == target:
+                return skill
         return None
 
     def list(self) -> list[Skill]:
@@ -813,21 +812,16 @@ class Daemon:
         self._record(task.id, {"type": "claim", "task_id": task.id,
                                "issue_id": task.issue_id,
                                "agent_id": task.assignee_id})
-        skill = None
-        if self.skill_loader:
-            skill = self.skill_loader.select(issue)
         agent = self._resolve_agent(task)
         if agent is None:
             result = {"status": "failed", "output": f"unknown agent: {task.assignee_id}",
                       "exit_code": 1, "session_id": ""}
         elif self.multi_runner is not None:
             result = self.multi_runner.run(agent.cli, task, issue, [], on_event,
-                                           resume_session_id=prior_sid or None,
-                                           append_system_prompt=skill.body if skill else None)
+                                           resume_session_id=prior_sid or None)
         else:
             result = self.runner.run(task, issue, [], on_event,
-                                     resume_session_id=prior_sid or None,
-                                     append_system_prompt=skill.body if skill else None)
+                                     resume_session_id=prior_sid or None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
             self.task_store.set_session_id(task.id, result["session_id"])
@@ -1248,7 +1242,6 @@ def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub)
 EXAMPLE_SKILL_MD = """---
 name: code-review
 description: 审查代码变更,关注安全/正确性/可维护性
-keywords: review, 审查, PR, code review
 ---
 
 You are reviewing code. Focus on:

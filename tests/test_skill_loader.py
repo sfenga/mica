@@ -1,86 +1,36 @@
 import os, tempfile
-from sessions.zh.s08_skills import Skill, SkillLoader, Issue, IssueStatus
+from sessions.zh.s08_skills import SkillLoader
 
 
-def _tmp_skill(content):
+def _tmp_skill(content, subdir=""):
     d = tempfile.mkdtemp()
-    path = os.path.join(d, "SKILL.md")
-    with open(path, "w") as f:
+    root = os.path.join(d, subdir) if subdir else d
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "SKILL.md")
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return d, path
 
 
-def test_keywords_selects_skill():
-    d, _ = _tmp_skill("""---
+def test_loads_skill_from_markdown():
+    d, path = _tmp_skill("""---
 name: code-review
 description: review code
-keywords: review, 审查
 ---
 Focus on security.""")
     loader = SkillLoader(d)
-    issue = Issue(id="i1", workspace_id="ws", title="review the auth module")
-    skill = loader.select(issue)
-    assert skill is not None
-    assert skill.name == "code-review"
-    assert "Focus on security" in skill.body
+    skills = loader.list()
+    assert len(skills) == 1
+    assert skills[0].name == "code-review"
+    assert skills[0].description == "review code"
+    assert skills[0].path == path
+    assert "Focus on security" in skills[0].body
 
 
-def test_no_keywords_field_not_selected():
-    d, _ = _tmp_skill("""---
-name: general
-description: general skill
----
-No keywords field.""")
-    loader = SkillLoader(d)
-    issue = Issue(id="i1", workspace_id="ws", title="anything")
-    assert loader.select(issue) is None
-
-
-def test_no_keyword_hit_runs_without_skill():
-    d, _ = _tmp_skill("""---
-name: code-review
-keywords: review
----
-Focus on security.""")
-    loader = SkillLoader(d)
-    issue = Issue(id="i1", workspace_id="ws", title="fix login bug")
-    assert loader.select(issue) is None  # 不命中
-
-
-def test_first_keyword_hit_wins():
-    d = tempfile.mkdtemp()
-    for name, keyword in [("first", "fix"), ("second", "bug")]:
-        path = os.path.join(d, "SKILL.md" if name == "first" else "SKILL2.md")
-        with open(path, "w") as f:
-            f.write(f"---\nname: {name}\nkeywords: {keyword}\n---\nbody")
-    # 注意:SkillLoader 扫 **/SKILL.md,SKILL2.md 不被扫到
-    # 改用子目录:
-    # 实际测试用子目录
-    d2 = tempfile.mkdtemp()
-    os.makedirs(os.path.join(d2, "a"), exist_ok=True)
-    os.makedirs(os.path.join(d2, "b"), exist_ok=True)
-    with open(os.path.join(d2, "a", "SKILL.md"), "w") as f:
-        f.write("---\nname: first\nkeywords: fix\n---\nbody a")
-    with open(os.path.join(d2, "b", "SKILL.md"), "w") as f:
-        f.write("---\nname: second\nkeywords: fix.*bug\n---\nbody b")
-    loader = SkillLoader(d2)
-    issue = Issue(id="i1", workspace_id="ws", title="fix login bug")
-    skill = loader.select(issue)
-    assert skill.name == "first"  # sorted glob → a/ 先于 b/
-
-
-def test_empty_dir_no_skills():
-    d = tempfile.mkdtemp()
-    loader = SkillLoader(d)
-    assert loader.list() == []
-    assert loader.select(Issue(id="i", workspace_id="ws", title="anything")) is None
-
-
-def test_skill_body_is_markdown_content():
+def test_get_skill_by_name_case_insensitive():
     d, _ = _tmp_skill("""---
 name: deploy
 description: deploy guide
-keywords: deploy
 ---
 ## Deploy Steps
 1. Build
@@ -88,7 +38,30 @@ keywords: deploy
 3. Release
 """)
     loader = SkillLoader(d)
-    issue = Issue(id="i1", workspace_id="ws", title="deploy the service")
-    skill = loader.select(issue)
-    assert "## Deploy Steps" in skill.body
-    assert "1. Build" in skill.body
+    assert loader.get("deploy").name == "deploy"
+    assert loader.get("DEPLOY").name == "deploy"
+    assert loader.get(" missing ") is None
+
+
+def test_scans_nested_skill_directories_in_order():
+    d = tempfile.mkdtemp()
+    for subdir, name in [("b", "second"), ("a", "first")]:
+        os.makedirs(os.path.join(d, subdir), exist_ok=True)
+        with open(os.path.join(d, subdir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: {name}\ndescription: d\n---\nbody")
+    loader = SkillLoader(d)
+    assert [s.name for s in loader.list()] == ["first", "second"]
+
+
+def test_ignores_files_without_frontmatter():
+    d, _ = _tmp_skill("No frontmatter here.")
+    loader = SkillLoader(d)
+    assert loader.list() == []
+    assert loader.get("anything") is None
+
+
+def test_empty_dir_no_skills():
+    d = tempfile.mkdtemp()
+    loader = SkillLoader(d)
+    assert loader.list() == []
+    assert loader.get("anything") is None
