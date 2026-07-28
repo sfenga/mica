@@ -1,5 +1,6 @@
 import { createApp, reactive } from 'https://unpkg.com/petite-vue@0.4.1/dist/petite-vue.es.js';
 import { EmptyState, Spinner, ToastContainer } from './components/common.js';
+import { BoardView } from './components/board.js';
 
 export const store = reactive({
   tab: 'board',
@@ -185,4 +186,4 @@ function App() {
   };
 }
 
-createApp({ App, EmptyState, Spinner, ToastContainer }).mount('#app');
+createApp({ App, EmptyState, Spinner, ToastContainer, BoardView }).mount('#app');
