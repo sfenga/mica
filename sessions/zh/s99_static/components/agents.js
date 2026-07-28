@@ -66,8 +66,8 @@ const AgentCardTemplate = `
         <option v-for="s in unboundSkills" :key="s.name" :value="s.name">{{ s.name }}</option>
       </select>
     </div>
-    <textarea class="w-full border rounded-md px-3 py-2 text-xs mt-3 font-mono" rows="2">{{ agent.system_prompt || '' }}</textarea>
-    <button @click="savePrompt" class="btn-secondary text-xs mt-2" :disabled="store.isLoading('agent.prompt')">Save prompt</button>
+    <textarea v-model="systemPrompt" class="w-full border rounded-md px-3 py-2 text-xs mt-3 font-mono" rows="2"></textarea>
+    <button @click="savePrompt" class="btn-secondary text-xs mt-2" :disabled="store.isLoading('agent.prompt.' + agent.id)">Save prompt</button>
   </div>
 `;
 
@@ -75,8 +75,10 @@ export function AgentCard(agent) {
   return {
     agent,
     store,
+    systemPrompt: agent.system_prompt || '',
     $template: AgentCardTemplate,
     async bindSkill(name) {
+      if (!name) return;
       await apiPost(`/api/agents/${agent.id}/skills`, { skill_name: name }, `agent.skill`);
       await this.load();
     },
@@ -84,9 +86,8 @@ export function AgentCard(agent) {
       await apiDelete(`/api/agents/${agent.id}/skills/${encodeURIComponent(name)}`, `agent.skill`);
       await this.load();
     },
-    async savePrompt(e) {
-      const ta = e.target.closest('.agent-card').querySelector('textarea');
-      await apiPatch(`/api/agents/${agent.id}`, { system_prompt: ta.value }, `agent.prompt`);
+    async savePrompt() {
+      await apiPatch(`/api/agents/${agent.id}`, { system_prompt: this.systemPrompt }, `agent.prompt.${agent.id}`);
       await this.load();
       toast('prompt saved', 'success');
     },
