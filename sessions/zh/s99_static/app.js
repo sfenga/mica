@@ -46,13 +46,17 @@ export function toast(message, type = 'info') {
 }
 
 export async function api(path, opts = {}) {
-  const key = opts.loadingKey;
+  const { loadingKey: key, ...rest } = opts;
   if (key) store.loading[key] = true;
-  delete opts.loadingKey;
   try {
-    const res = await fetch(path, opts);
+    const res = await fetch(path, rest);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || res.statusText || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     if (data && data.error) throw new Error(data.error);
+    if (key) delete store.errors[key];
     return data;
   } catch (err) {
     if (key) store.errors[key] = err.message;
@@ -88,7 +92,8 @@ export class WsManager {
     if (this.socket && store.wsConn.issueId === issueId) return;
     this.disconnect();
     store.wsConn.issueId = issueId;
-    const url = `ws://${location.host}/ws/issues/${issueId}`;
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${protocol}//${location.host}/ws/issues/${issueId}`;
     try {
       this.socket = new WebSocket(url);
     } catch (e) {

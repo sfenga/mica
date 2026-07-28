@@ -1,4 +1,4 @@
-import { store, toast } from '../app.js';
+import { store } from '../app.js';
 
 export function Badge(status) {
   const colors = {
