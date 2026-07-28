@@ -43,3 +43,25 @@
   to { opacity: 1; transform: translateY(0); }
 }
 .toast-item { animation: toast-in 200ms ease-out; }
+
+/* Kanban column wrapper */
+.kanban-col { /* layout handled by Tailwind utility classes */ }
+
+/* Issue drawer slide-in animation */
+@keyframes slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.slide-in { animation: slide-in 250ms ease-out; }
+
+/* Prose-like body text for issue descriptions */
+.prose {
+  line-height: 1.65;
+  color: #374151;
+}
+.prose p { margin-bottom: 0.75rem; }
+.prose ul, .prose ol { margin-left: 1.25rem; margin-bottom: 0.75rem; }
+.prose li { margin-bottom: 0.25rem; }
+.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; margin-top: 1rem; margin-bottom: 0.5rem; }
+.prose-sm { font-size: 0.875rem; }
+.prose a { color: #4f46e5; text-decoration: underline; }

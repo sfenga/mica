@@ -115,7 +115,7 @@ IssueDrawer.$template = `
         <div v-for="t in issue.tasks || []" :key="t.id" class="text-xs font-mono text-gray-500 border-l-2 border-blue-400 pl-2 mb-2">
           task {{ shortId(t.id) }} → {{ t.status }}
         </div>
-        <div v-for="c in issue.comments || []" :key="c" class="text-sm bg-gray-50 rounded-lg p-3 mb-2" :class="c.startsWith('[agent') ? 'border-l-4 border-indigo-400' : 'border-l-4 border-blue-400'">
+        <div v-for="(c, idx) in issue.comments || []" :key="issue.id + '-' + idx" class="text-sm bg-gray-50 rounded-lg p-3 mb-2" :class="c.startsWith('[agent') ? 'border-l-4 border-indigo-400' : 'border-l-4 border-blue-400'">
           {{ esc(c) }}
         </div>
       </div>
