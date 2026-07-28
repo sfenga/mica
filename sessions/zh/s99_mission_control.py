@@ -30,8 +30,11 @@ from enum import Enum
 from typing import Callable, Protocol, TypedDict
 
 from croniter import croniter
+from pathlib import Path
+
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 
 def now_iso() -> str:
@@ -2782,10 +2785,6 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     if scheduler is None and autopilot_store is not None:
         scheduler = Scheduler(autopilot_store, issue_store, task_store)
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        return CONSOLE_HTML
-
     # --- Overview ---
     @app.get("/api/overview")
     def overview():
@@ -3224,6 +3223,9 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         if project_store is not None:
             project_store._projects.clear()
         return {"issues": 0, "tasks": 0, "squads": 0, "autopilots": 0}
+
+    static_dir = Path(__file__).with_suffix("").parent / "s99_static"
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app
 

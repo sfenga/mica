@@ -201,8 +201,9 @@ def test_get_console_html(tmp_path):
     client, *_ = _client(tmp_path)
     res = client.get("/")
     assert res.status_code == 200
-    assert "mica" in res.text.lower()
-    assert "mission control" in res.text.lower() or "console" in res.text.lower()
+    text = res.text.lower()
+    assert "mica" in text
+    assert "petite-vue" in text or "app.js" in text
 
 
 def test_project_create_and_list(tmp_path):
@@ -412,3 +413,8 @@ def test_fs_browse_route(tmp_path):
     assert isinstance(res2["dirs"], list)
 
 
+def test_static_files_served(tmp_path):
+    """/app.js and /styles.css are served by StaticFiles."""
+    client, *_ = _client(tmp_path)
+    assert client.get("/app.js").status_code == 200
+    assert client.get("/styles.css").status_code == 200

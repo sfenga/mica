@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mica — Mission Control</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module" src="/app.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" v-scope class="h-screen flex flex-col bg-gray-50 text-gray-900">
+    <header class="h-14 bg-white border-b px-4 flex items-center gap-4">
+      <span class="font-bold text-indigo-600">◆ mica</span>
+      <nav class="flex gap-1">
+        <button v-for="t in tabs" :key="t.key"
+                @click="store.tab = t.key"
+                :class="store.tab === t.key ? 'bg-indigo-50 text-indigo-700' : 'text-gray-600 hover:bg-gray-100'"
+                class="px-3 py-1.5 rounded-md text-sm font-medium">
+          {{ t.label }}
+        </button>
+      </nav>
+    </header>
+    <main class="flex-1 overflow-auto p-4">
+      <h1 class="text-2xl font-semibold">{{ currentTabLabel }}</h1>
+      <p class="text-gray-500 mt-2">Mission Control dashboard loaded.</p>
+    </main>
+  </div>
+</body>
+</html>
