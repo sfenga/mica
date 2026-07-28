@@ -10,7 +10,7 @@ def _tmp_skill(content):
     return d, path
 
 
-def test_match_selects_skill():
+def test_keywords_selects_skill():
     d, _ = _tmp_skill("""---
 name: code-review
 description: review code
@@ -25,18 +25,18 @@ Focus on security.""")
     assert "Focus on security" in skill.body
 
 
-def test_no_match_field_not_selected():
+def test_no_keywords_field_not_selected():
     d, _ = _tmp_skill("""---
 name: general
 description: general skill
 ---
-No match field.""")
+No keywords field.""")
     loader = SkillLoader(d)
     issue = Issue(id="i1", workspace_id="ws", title="anything")
     assert loader.select(issue) is None
 
 
-def test_no_match_runs_without_skill():
+def test_no_keyword_hit_runs_without_skill():
     d, _ = _tmp_skill("""---
 name: code-review
 keywords: review
@@ -47,12 +47,12 @@ Focus on security.""")
     assert loader.select(issue) is None  # 不命中
 
 
-def test_first_match_wins():
+def test_first_keyword_hit_wins():
     d = tempfile.mkdtemp()
-    for name, match in [("first", "fix"), ("second", "bug")]:
+    for name, keyword in [("first", "fix"), ("second", "bug")]:
         path = os.path.join(d, "SKILL.md" if name == "first" else "SKILL2.md")
         with open(path, "w") as f:
-            f.write(f"---\nname: {name}\nmatch: {match}\n---\nbody")
+            f.write(f"---\nname: {name}\nkeywords: {keyword}\n---\nbody")
     # 注意:SkillLoader 扫 **/SKILL.md,SKILL2.md 不被扫到
     # 改用子目录:
     # 实际测试用子目录

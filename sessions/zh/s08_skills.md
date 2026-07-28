@@ -71,7 +71,7 @@ result = self.runner.run(task, issue, [], on_event,
 
 ### 为什么用 `keywords` 关键词,不用正则?
 
-正则太复杂、容易写错,和 multiCa 的 frontmatter(`name`/`description`,无 match)完全不同。关键词子串匹配简单直观:`keywords: "review, 审查, PR"` 就是三个关键词,逗号分隔,任一出现在 issue title+body 即命中。multiCa 的 frontmatter 只有 `name`/`description`(`skill/frontmatter.go:17,27`),没有匹配字段——技能是显式关联到 agent 的。mica 加 `keywords` 是在 multiCa 的基础上加了一个简单字段做召回,不是另起炉灶。
+正则太复杂、容易写错,和 multiCa 的 frontmatter(`name`/`description`,不带额外召回字段)完全不同。关键词子串匹配简单直观:`keywords: "review, 审查, PR"` 就是三个关键词,逗号分隔,任一出现在 issue title+body 即命中。multiCa 的 frontmatter 只有 `name`/`description`(`skill/frontmatter.go:17,27`),没有匹配字段——技能是显式关联到 agent 的。mica 加 `keywords` 是在 multiCa 的基础上加了一个简单字段做召回,不是另起炉灶。
 
 ### 为什么技能进 user prompt,不进 `--append-system-prompt`?
 

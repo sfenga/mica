@@ -19,7 +19,7 @@ mica 复用这套范式,主题为 multiCa 的核心机制(issue 派活 + daemon 
 - s05 评论建新 task + `--resume` 上一 task.session_id + resume 失效降级
 - s06 WebSocket 实时进度
 - s07 FastAPI 单页看板 + 创建/状态转移/评论
-- s08 markdown 技能注入(frontmatter.match 正则)
+- s08 markdown 技能注入(frontmatter.keywords 关键词)
 - s09 cron autopilot(建 issue + 入队 task)
 - s10 多 CLI + PATH 探测(1 daemon : N agent)
 - s11 多 workspace 隔离 + 成员资格闸门

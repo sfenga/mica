@@ -23,6 +23,8 @@ issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude
 | s12 | Squads:leader-first 多 agent 协调 |
 | s13 | Project + workdir:让 agent 在正确代码目录执行 |
 | s14 | Mission Control:集成控制台 + API + 页面 |
+| s15 | Agent Profile:system_prompt + skill 绑定 + daemon 注入 |
+| s16 | Console Agents Panel:Agents 面板 + API + assignee 下拉 |
 
 ## 快速开始
 

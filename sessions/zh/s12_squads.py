@@ -118,21 +118,21 @@ class RealtimeHub:
 
 
 # ===========================================================================
-# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.match 正则选技能)
+# s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
-    match: str          # 正则,作用于 issue.title + issue.body;空串=不自动选中
-    body: str           # markdown 正文(skill 内容)
+    keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
+    body: str = ""      # markdown 正文(skill 内容)
     path: str = ""      # SKILL.md 文件路径
 
 
 class SkillLoader:
-    """扫 workspace/skills/**/SKILL.md,按 frontmatter.match 正则选技能。
+    """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
 
-    扫描顺序:sorted glob(recursive)。首个命中即选中(无 match 字段的不自动选中)。
+    扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
     """
 
     def __init__(self, skills_dir: str):
@@ -150,7 +150,7 @@ class SkillLoader:
                 self._skills.append(skill)
 
     def _parse(self, path: str) -> Skill | None:
-        """解析 SKILL.md:---name/description/match--- + 正文。"""
+        """解析 SKILL.md:---name/description/keywords--- + 正文。"""
         with open(path, encoding="utf-8") as f:
             content = f.read()
         # 解析 frontmatter(--- 之间的 key: value)
@@ -169,17 +169,19 @@ class SkillLoader:
         return Skill(
             name=fields.get("name", ""),
             description=fields.get("description", ""),
-            match=fields.get("match", ""),
+            keywords=fields.get("keywords", ""),
             body=body,
             path=path,
         )
 
     def select(self, issue) -> Skill | None:
-        """用 match 正则测 issue.title+body,取首个命中。无 match 字段的不选。"""
-        text = issue.title + "\n" + (issue.body or "")
+        """用 keywords 关键词子串匹配 issue.title+body,取首个命中。无 keywords 字段的不选。"""
+        text = (issue.title + "\n" + (issue.body or "")).lower()
         for skill in self._skills:
-            if skill.match and re.search(skill.match, text):
-                return skill
+            if skill.keywords:
+                for kw in skill.keywords.split(","):
+                    if kw.strip().lower() in text:
+                        return skill
         return None
 
     def list(self) -> list[Skill]:
@@ -1301,7 +1303,7 @@ def create_app(issue_store: IssueStore, task_store: TaskStore, hub: RealtimeHub)
 EXAMPLE_SKILL_MD = """---
 name: code-review
 description: 审查代码变更,关注安全/正确性/可维护性
-match: review|审.*查|PR
+keywords: review, 审查, PR, code review
 ---
 
 You are reviewing code. Focus on:
