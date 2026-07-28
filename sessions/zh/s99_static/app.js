@@ -1,7 +1,7 @@
 import { createApp, reactive } from 'https://unpkg.com/petite-vue@0.4.1/dist/petite-vue.es.js';
-import { Badge, EmptyState, Spinner, ToastContainer } from './components/common.js';
-import { BoardView } from './components/board.js';
-import { QueueView } from './components/queue.js';
+import { Badge, EmptyState, Spinner, ToastContainer, shortId, esc } from './components/common.js';
+import { BoardView, KanbanColumn, IssueCard, IssueDrawer } from './components/board.js';
+import { QueueView, TaskTable, TracePanel } from './components/queue.js';
 
 export const store = reactive({
   tab: 'board',
@@ -187,4 +187,10 @@ function App() {
   };
 }
 
-createApp({ App, Badge, EmptyState, Spinner, ToastContainer, BoardView, QueueView }).mount('#app');
+createApp({
+  App,
+  Badge, EmptyState, Spinner, ToastContainer,
+  BoardView, KanbanColumn, IssueCard, IssueDrawer,
+  QueueView, TaskTable, TracePanel,
+  shortId, esc,
+}).mount('#app');
