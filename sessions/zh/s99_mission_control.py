@@ -1,11 +1,15 @@
-"""s12 — Squads leader-first 协调模型
+"""s99 — Mission Control(最终集成控制台)
 
-本文件是 s01-s12 的累积教学代码。s12 在 s11 的 workspace/member 基础上,
-加入一个教学版 squad 编排器:
-- squad 可以成为 issue assignee;
-- 系统先唤醒 leader agent,而不是直接哈希选择 worker;
-- leader task 携带 is_leader_task + squad_id,用于注入 briefing;
-- leader 可委派 worker,worker 回报和 child stage 完成会再次唤醒 leader。
+本文件是 s01-s14 的累积教学代码,也是最终观察控制台。s99 集成 s14 的 Agent Profile:
+
+- Agent 增加 system_prompt / skill_names;AgentStore 持久化(agents.jsonl);
+- SkillLoader 使用 keywords 关键词召回,新增 get(name);
+- Daemon.execute 按 task.assignee_id 查 agent,注入 system_prompt + 绑定 skill +
+  issue 匹配 skill(两层去重);
+- API:GET/POST/PATCH /api/agents、/api/agents/{id}/skills 绑定/解绑;
+  GET /api/agents 在 AgentStore 为空时回退 runtime.clis 派生(兼容);
+- Mission Control 暴露 Agent Profile:创建 agent、编辑 system_prompt、多选绑 skill;
+  issue 创建表单 assignee 下拉从 /api/agents 来。
 """
 from __future__ import annotations
 
@@ -119,20 +123,22 @@ class RealtimeHub:
 
 # ===========================================================================
 # s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
+# s99:使用 keywords 关键词召回,新增 get(name) 供 agent 绑定解析。
 # ===========================================================================
 @dataclass
 class Skill:
     name: str
     description: str
     keywords: str = ""     # 逗号分隔关键词;空串=不自动选中
-    body: str = ""      # markdown 正文(skill 内容)
-    path: str = ""      # SKILL.md 文件路径
+    body: str = ""         # markdown 正文(skill 内容)
+    path: str = ""         # SKILL.md 文件路径
 
 
 class SkillLoader:
     """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
 
     扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
+    s99 新增 get(name):按 name 查找(大小写不敏感),供 agent 绑定解析。
     """
 
     def __init__(self, skills_dir: str):
@@ -184,6 +190,17 @@ class SkillLoader:
                         return skill
         return None
 
+    def get(self, name: str) -> Skill | None:
+        """按 name 查找技能(大小写不敏感)。供 agent.skill_names 绑定解析。"""
+        if not name:
+            return None
+        target = name.strip().lower()
+        for skill in self._skills:
+            if skill.name.strip().lower() == target:
+                return skill
+        return None
+
+
     def list(self) -> list[Skill]:
         return list(self._skills)
 
@@ -223,6 +240,132 @@ class Agent:
     name: str
     cli: str = "claude"
     runtime_id: str = "local"
+    # s14/s99:agent 可配置执行主体 —— 身份提示词 + 绑定的技能名。
+    system_prompt: str = ""          # -> --append-system-prompt
+    skill_names: list[str] = field(default_factory=list)  # 绑定 skill 名(SkillLoader.get 解析)
+
+
+def _agent_to_dict(a: Agent) -> dict:
+    return asdict(a)
+
+
+def _agent_from_dict(d: dict) -> Agent:
+    return Agent(
+        id=d["id"],
+        name=d.get("name", ""),
+        cli=d.get("cli", "claude"),
+        runtime_id=d.get("runtime_id", "local"),
+        system_prompt=d.get("system_prompt", ""),
+        skill_names=list(d.get("skill_names", [])),
+    )
+
+
+# ===========================================================================
+# s14 — AgentStore(agents.jsonl snapshot-append,与 ProjectStore 同模式)
+# ===========================================================================
+class AgentStore:
+    """可配置 agent 持久化。data_dir 给定则 agents.jsonl snapshot-append(last-wins 重放)。
+    id 由调用方给(允许 agent-ui 这种语义 id),不强制 uuid。"""
+
+    def __init__(self, data_dir: str | None = None) -> None:
+        self._agents: dict[str, Agent] = {}
+        self._lock = threading.Lock()
+        self._path: str | None = None
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            self._path = os.path.join(data_dir, "agents.jsonl")
+            self._load()
+
+    def _load(self) -> None:
+        if not self._path or not os.path.exists(self._path):
+            return
+        with open(self._path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                agent = _agent_from_dict(rec)
+                self._agents[agent.id] = agent   # last-wins
+
+    def _persist(self, agent: Agent) -> None:
+        if not self._path:
+            return
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(agent), ensure_ascii=False) + "\n")
+
+    def create(self, id: str, name: str, cli: str = "claude",
+               runtime_id: str = "local", system_prompt: str = "",
+               skill_names: list[str] | None = None) -> Agent:
+        with self._lock:
+            if id in self._agents:
+                raise KeyError(f"agent already exists: {id}")
+            agent = Agent(
+                id=id, name=name, cli=cli, runtime_id=runtime_id,
+                system_prompt=system_prompt,
+                skill_names=list(skill_names) if skill_names else [],
+            )
+            self._agents[agent.id] = agent
+            self._persist(agent)
+            return agent
+
+    def get(self, agent_id: str) -> Agent | None:
+        with self._lock:
+            return self._agents.get(agent_id)
+
+    def list(self) -> list[Agent]:
+        with self._lock:
+            return list(self._agents.values())
+
+    def update(self, agent_id: str, **fields) -> Agent:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise KeyError(f"agent not found: {agent_id}")
+            for k in ("name", "cli", "runtime_id", "system_prompt", "skill_names"):
+                if k in fields and fields[k] is not None:
+                    setattr(agent, k, list(fields[k]) if k == "skill_names" else fields[k])
+            self._persist(agent)
+            return agent
+
+    def bind_skill(self, agent_id: str, skill_name: str) -> Agent:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise KeyError(f"agent not found: {agent_id}")
+            if skill_name and skill_name not in agent.skill_names:
+                agent.skill_names.append(skill_name)
+            self._persist(agent)
+            return agent
+
+    def unbind_skill(self, agent_id: str, skill_name: str) -> Agent:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise KeyError(f"agent not found: {agent_id}")
+            if skill_name in agent.skill_names:
+                agent.skill_names.remove(skill_name)
+            self._persist(agent)
+            return agent
+
+
+def merge_skills(bound: list[Skill], matched: "Skill | None") -> str:
+    """合并 agent 绑定 skill + issue 自动匹配 skill,按 name 去重。
+
+    每个 skill 拼 '## Skill: {name}\\n{body}',空行分隔。全空返回 ""。
+    不同 agent 的绑定 skill 互相隔离(各自的 skill_names 决定 bound)。
+    """
+    seen: set[str] = set()
+    parts: list[str] = []
+    for skill in list(bound) + ([matched] if matched else []):
+        if skill is None:
+            continue
+        key = skill.name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(f"## Skill: {skill.name}\n{skill.body}")
+    return "\n\n".join(parts)
 
 
 @dataclass
@@ -890,7 +1033,8 @@ class Daemon:
                  session_store: "SessionStore | None" = None,
                  hub: "RealtimeHub | None" = None,
                  skill_loader: "SkillLoader | None" = None,
-                 project_store: "ProjectStore | None" = None) -> None:
+                 project_store: "ProjectStore | None" = None,
+                 agent_store: "AgentStore | None" = None) -> None:
         # s10:1:N daemon。runtime_id 标识本 daemon(托管本 runtime 上所有 agent);
         # agent_id 仅为兼容 s02 的 1:1 模式保留,claim_next 不再按它过滤。
         self.issue_store = issue_store
@@ -903,6 +1047,9 @@ class Daemon:
         self.hub = hub
         self.skill_loader = skill_loader
         self.project_store = project_store
+        # s14/s99:agent_store 让 daemon 按 task.assignee_id 查 agent 配置
+        # (system_prompt + 绑定 skill)。None 时兼容旧逻辑(只 issue 匹配 skill)。
+        self.agent_store = agent_store
         self._stop = False
 
     def _record(self, task_id: str, event: dict) -> None:
@@ -970,12 +1117,20 @@ class Daemon:
         self._record(task.id, {"type": "claim", "task_id": task.id,
                                "issue_id": task.issue_id,
                                "agent_id": task.assignee_id})
-        skill = None
-        if self.skill_loader:
-            skill = self.skill_loader.select(issue)
+        # s14/s99:按 task.assignee_id 查 agent 配置(system_prompt + 绑定 skill)。
+        agent = self.agent_store.get(task.assignee_id) if self.agent_store else None
+        system_prompt = agent.system_prompt if agent else ""
+        bound: list[Skill] = []
+        if agent and self.skill_loader:
+            bound = [self.skill_loader.get(n) for n in agent.skill_names]
+            bound = [s for s in bound if s is not None]
+        # issue 自动匹配 skill(临时补充,与 agent 绑定 skill 合并去重)。
+        matched = self.skill_loader.select(issue) if self.skill_loader else None
+        skill_body = merge_skills(bound, matched)
         result = self.runner.run(task, issue, [], on_event,
                                  resume_session_id=prior_sid or None,
-                                 skill_body=skill.body if skill else None,
+                                 append_system_prompt=system_prompt or None,
+                                 skill_body=skill_body or None,
                                  cwd=workdir or None)
         # 覆盖 task.session_id(命中=同 id no-op;失效=新 id 覆盖)
         if result.get("session_id"):
@@ -1975,15 +2130,15 @@ def main(data_dir=None) -> int:
 
 
 # ===========================================================================
-# s13 — Learning Console (Mission Control UI + 25 API endpoints)
+# s99 — Mission Control (最终集成控制台)
 # ===========================================================================
-# 本节在 s12 verbatim 之上加入:
+# 本节把 s01-s14 的核心对象集中到本地观察控制台:
 # - 序列化 helpers(_squad_to_dict / _skill_to_dict / _runtime_to_dict / _member_to_dict)
-# - create_console_app():闭包持有全部 stores/services,FastAPI 路由 ~25 个端点
-# - CONSOLE_HTML:内联 dark + amber 主题 / CSS Grid / 10 个页面段 / vanilla JS
+# - create_console_app():闭包持有全部 stores/services,暴露本地 API
+# - CONSOLE_HTML:内联 HTML/CSS/JS,用于观察和操作系统对象
 # - main():内存装配(IssueStore/TaskStore/SessionStore/MemberStore/AutopilotStore
 #           + RealtimeHub + SkillLoader + Scheduler + SquadRouter + Daemon(StubRunner)
-#           + PathDetector → Runtime + agents)→ uvicorn.run(port=8000)
+#           + AgentStore + PathDetector → Runtime + agents)→ uvicorn.run(port=8000)
 # s07 的 create_app / HTML_PAGE 保留为内部 helper,不再作为主入口。
 # ===========================================================================
 
@@ -2008,7 +2163,7 @@ def _skill_to_dict(s: "Skill") -> dict:
     return {
         "name": s.name,
         "description": s.description,
-        "keywords": [kw.strip() for kw in s.keywords.split(",") if kw.strip()],
+        "keywords": s.keywords,
         "path": s.path,
         "body": (s.body or "")[:200],
     }
@@ -2020,10 +2175,6 @@ def _runtime_to_dict(r: "Runtime") -> dict:
 
 def _member_to_dict(m: "Member") -> dict:
     return {"id": m.id, "name": m.name}
-
-
-def _agent_to_dict(a: "Agent") -> dict:
-    return {"id": a.id, "name": a.name, "cli": a.cli, "runtime_id": a.runtime_id}
 
 
 def _project_to_dict(p: "Project") -> dict:
@@ -2219,6 +2370,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <div class="item" data-v="workspaces">Workspaces</div>
     <div class="item" data-v="squads">Squads</div>
     <div class="item" data-v="projects">Projects</div>
+    <div class="item" data-v="agents">Agents</div>
   </div>
   <div class="main">
     <div class="panel" id="list-panel"><h2 id="list-title">Overview</h2><div id="list"></div></div>
@@ -2296,7 +2448,10 @@ async function loadView(v){
     const projs=await api('/api/projects');
     let projOpts='<option value="">no project</option>';
     (projs||[]).forEach(p=>{projOpts+='<option value="'+p.id+'">'+esc(p.name)+' ('+short(p.id)+')</option>';});
-    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><input name="assignee_id" placeholder="agent-1"><select name="project_id" title="project (optional)">'+projOpts+'</select><button class="btn primary">+ New</button></form>'+issuesTable(d);
+    const ags=await api('/api/agents');
+    let agOpts='';
+    (ags||[]).forEach(a=>{agOpts+='<option value="'+a.id+'">'+esc(a.name)+' ('+a.id+')</option>';});
+    list.innerHTML='<form class="inline" onsubmit="createIssue(event)"><input name="title" placeholder="title" required><input name="body" placeholder="body (optional)"><select name="assignee_type"><option value="agent">agent</option><option value="squad">squad</option><option value="member">member</option></select><select name="assignee_id" title="assignee">'+agOpts+'</select><select name="project_id" title="project (optional)">'+projOpts+'</select><button class="btn primary">+ New</button></form>'+issuesTable(d);
   } else if(state.view==='tasks'){
     const d=await api('/api/tasks?workspace_id='+encodeURIComponent(state.ws));
     list.innerHTML=tasksTable(d)+'<p style="margin-top:8px"><button class="btn" onclick="runDaemonOnce()">▶ Run daemon once</button></p>';
@@ -2346,6 +2501,29 @@ async function loadView(v){
     h+='<div class="list-row head" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>ID</span><span>Name</span><span>Local Path</span><span>Repo</span><span></span></div>';
     (d||[]).forEach(p=>{h+='<div class="list-row" style="grid-template-columns:90px 1fr 1fr 1fr 90px"><span>'+short(p.id)+'</span><span>'+esc(p.name)+'</span><span style="font-size:11px">'+esc(p.local_path||'-')+'</span><span style="font-size:11px">'+esc(p.repo_url||'-')+'</span><span></span></div>';});
     list.innerHTML=h||'<p class="empty">no projects</p>';
+  } else if(state.view==='agents'){
+    const d=await api('/api/agents');
+    const skills=await api('/api/skills');
+    let skillList=(skills||[]).map(s=>s.name);
+    let h='<form class="inline" onsubmit="createAgent(event)" style="align-items:flex-start;flex-wrap:wrap"><input name="id" placeholder="agent id" required><input name="name" placeholder="name" required><select name="cli"><option value="claude">claude</option><option value="codex">codex</option><option value="copilot">copilot</option></select><input name="skill_names" placeholder="react, css (comma)" style="min-width:200px"><textarea name="system_prompt" placeholder="system prompt (agent identity)..." style="width:100%;min-height:60px;margin-top:6px;font-family:var(--mono);font-size:12px"></textarea><button class="btn primary" style="margin-top:6px">+ New agent</button></form>';
+    h+='<div style="margin-top:16px"></div>';
+    (d||[]).forEach(a=>{
+      h+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--surface)">';
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="color:var(--accent);font-size:14px">'+esc(a.name)+'</b> <span style="font-family:var(--mono);font-size:11px;color:var(--muted)">('+esc(a.id)+' · '+esc(a.cli)+' / '+esc(a.runtime_id)+')</span></div>';
+      // 已绑 skill 标签(可 ✕ 解绑)
+      h+='<div style="margin-bottom:6px;font-size:11px;color:var(--muted);font-family:var(--mono)">skills: ';
+      (a.skill_names||[]).forEach(sn=>{h+='<span style="display:inline-block;background:var(--accent-light);color:var(--accent);padding:2px 8px;border-radius:10px;margin-right:4px;margin-top:2px">'+esc(sn)+' <a onclick="unbindAgentSkill(&#39;'+a.id+'&#39;,&#39;'+esc(sn)+'&#39;)" style="cursor:pointer;color:var(--err)">✕</a></span>';});
+      if(!(a.skill_names||[]).length) h+='<span style="color:var(--muted)">(none)</span>';
+      h+='</div>';
+      // 绑定 skill 下拉(只列未绑的)
+      let unbound=skillList.filter(n=>!(a.skill_names||[]).includes(n));
+      if(unbound.length){h+='<select id="bind-'+a.id+'" style="font-size:11px;font-family:var(--mono);padding:3px 6px;border-radius:6px;border:1px solid var(--border);background:var(--surface2)"><option value="">+ bind skill...</option>';unbound.forEach(n=>{h+='<option value="'+esc(n)+'">'+esc(n)+'</option>';});h+='</select> <button class="btn" style="padding:3px 10px;font-size:11px" onclick="bindAgentSkill(&#39;'+a.id+'&#39;)">bind</button>';}
+      // system prompt 编辑
+      h+='<div style="margin-top:8px"><textarea id="sp-'+a.id+'" placeholder="system prompt..." style="width:100%;min-height:48px;font-family:var(--mono);font-size:11px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2)">'+esc(a.system_prompt||'')+'</textarea></div>';
+      h+='<div style="margin-top:6px"><button class="btn" style="padding:4px 10px;font-size:11px" onclick="updateAgentPrompt(&#39;'+a.id+'&#39;)">Save prompt</button></div>';
+      h+='</div>';
+    });
+    list.innerHTML=h||'<p class="empty">no agents (create one above; empty list falls back to runtime-derived agents)</p>';
   }
 }
 function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="sub">'+(sub||'')+'</div></div>';}
@@ -2496,6 +2674,10 @@ function renderTrace(issue){el('tl-panel').querySelector('h2').textContent='Life
 
 async function createIssue(e){e.preventDefault();const f=new FormData(e.target);try{const r=await fetch('/api/issues?'+new URLSearchParams({title:f.get('title'),body:f.get('body')||'',assignee_type:f.get('assignee_type'),assignee_id:f.get('assignee_id')||'agent-1',project_id:f.get('project_id')||'',workspace_id:state.ws,member_id:state.member}),{method:'POST'});const d=await r.json();if(d&&d.error){setStatus('create failed: '+d.error,'var(--err)');return;}loadView();}catch(err){setStatus('create failed: '+err.message,'var(--err)');}}
 async function createProject(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/projects?'+new URLSearchParams({name:f.get('name'),local_path:f.get('local_path')||'',repo_url:f.get('repo_url')||''}),{method:'POST'});loadView();}
+async function createAgent(e){e.preventDefault();const f=new FormData(e.target);try{const r=await fetch('/api/agents?'+new URLSearchParams({id:f.get('id'),name:f.get('name'),cli:f.get('cli'),system_prompt:f.get('system_prompt')||'',skill_names:f.get('skill_names')||''}),{method:'POST'});const d=await r.json();if(d&&d.error){setStatus('create failed: '+d.error,'var(--err)');return;}loadView();}catch(err){setStatus('create failed: '+err.message,'var(--err)');}}
+async function bindAgentSkill(id){const sel=el('bind-'+id);if(!sel||!sel.value)return;await fetch('/api/agents/'+id+'/skills?skill_name='+encodeURIComponent(sel.value),{method:'POST'});loadView();}
+async function unbindAgentSkill(id,name){await fetch('/api/agents/'+id+'/skills/'+encodeURIComponent(name),{method:'DELETE'});loadView();}
+async function updateAgentPrompt(id){const ta=el('sp-'+id);if(!ta)return;try{const r=await fetch('/api/agents/'+id+'?system_prompt='+encodeURIComponent(ta.value),{method:'PATCH'});const d=await r.json();if(d&&d.error){setStatus('save failed: '+d.error,'var(--err)');return;}setStatus('agent prompt saved','var(--ok)');}catch(err){setStatus('save failed: '+err.message,'var(--err)');}}
 async function createAutopilot(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/autopilots?'+new URLSearchParams({cron:f.get('cron'),agent_id:f.get('agent_id'),title:f.get('title')}),{method:'POST'});loadView();}
 async function createSquad(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/squads?'+new URLSearchParams({name:f.get('name'),leader_agent_id:f.get('leader_agent_id'),member_agent_ids:f.get('member_agent_ids')}),{method:'POST'});loadView();}
 async function previewSkill(e){e.preventDefault();const f=new FormData(e.target);const d=await fetch('/api/skills/preview?'+new URLSearchParams({title:f.get('title')||'',body:f.get('body')||''}),{method:'POST'}).then(r=>r.json());alert('Matched: '+(d.matched?d.matched.name:'none')+'\\n\\n'+(d.injected_prompt||''));}
@@ -2573,11 +2755,12 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                        skill_loader=None, autopilot_store=None,
                        scheduler=None, member_store=None,
                        squad_router=None, daemon=None,
-                       runtime=None, project_store=None) -> FastAPI:
+                       runtime=None, project_store=None,
+                       agent_store=None) -> FastAPI:
     """构造 Mission Control app;路由闭包持有全部 stores/services。"""
     app = FastAPI(title="mica Mission Control")
 
-    # --- 派生 agents(从 runtime.clis 映射)---
+    # --- 派生 agents(从 runtime.clis 映射,作 AgentStore 为空时的兜底)---
     _CLI_AGENT_MAP = {
         "claude": ("agent-1", "Claude"),
         "codex": ("agent-2", "Codex"),
@@ -2585,11 +2768,23 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         "opencode": ("agent-4", "OpenCode"),
         "cursor-agent": ("agent-5", "Cursor"),
     }
-    _agents: list[Agent] = []
+    _derived_agents: list[Agent] = []
     if runtime is not None:
         for cli in runtime.clis:
             aid, name = _CLI_AGENT_MAP.get(cli, (f"agent-{cli}", cli))
-            _agents.append(Agent(id=aid, name=name, cli=cli, runtime_id=runtime.id))
+            _derived_agents.append(Agent(id=aid, name=name, cli=cli, runtime_id=runtime.id))
+
+    def _all_agents() -> list[Agent]:
+        """合并:派生 agent(始终在,agent-1/agent-2 兜底)+ AgentStore 配置的 agent。
+        id 冲突时 AgentStore 覆盖派生(用户可重定义 agent-1 的 system_prompt/skills)。
+        这样创建自定义 agent 后,派生 agent-1/agent-2 不会从下拉里突然消失。"""
+        by_id: dict[str, Agent] = {}
+        for a in _derived_agents:
+            by_id[a.id] = a
+        if agent_store is not None:
+            for a in agent_store.list():
+                by_id[a.id] = a   # AgentStore 覆盖同 id 派生
+        return list(by_id.values())
 
     # --- 内部 workspaces 注册表(教学用,内存)---
     # ws-2 故意不带成员,用于演示 s11 成员闸门:切到 ws-2 后非成员 list/create 被拒,
@@ -2632,7 +2827,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             "tasks": len(tasks), "task_counts": tc,
             "autopilots": len(aps),
             "runtimes": 1 if runtime else 0,
-            "agents": len(_agents),
+            "agents": len(_all_agents()),
             "recent_activity": recent,
         }
 
@@ -2684,7 +2879,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         d = _issue_to_dict(issue)
         d["tasks"] = [_task_to_dict(t) for t in task_store.list(issue_id)]
         d["children"] = [_issue_to_dict(c) for c in issue_store.children(issue_id)]
-        # s13:解析 issue 关联 project 的 workdir 供前端展示
+        # s99:解析 issue 关联 project 的 workdir 供控制台展示
         workdir = ""
         if issue.project_id and project_store is not None:
             project = project_store.get(issue.project_id)
@@ -2842,7 +3037,71 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
 
     @app.get("/api/agents")
     def list_agents():
-        return [_agent_to_dict(a) for a in _agents]
+        # AgentStore 有 agent 返回它们;空时回退 runtime.clis 派生(兼容)
+        return [_agent_to_dict(a) for a in _all_agents()]
+
+    @app.post("/api/agents")
+    def create_agent(id: str, name: str, cli: str = "claude",
+                     runtime_id: str = "local", system_prompt: str = "",
+                     skill_names: str = ""):
+        if agent_store is None:
+            return {"error": "agent store not configured"}
+        names = [s.strip() for s in skill_names.split(",") if s.strip()] if skill_names else []
+        try:
+            agent = agent_store.create(id, name, cli=cli, runtime_id=runtime_id,
+                                        system_prompt=system_prompt, skill_names=names)
+        except KeyError as e:
+            return {"error": str(e)}
+        return _agent_to_dict(agent)
+
+    @app.get("/api/agents/{agent_id}")
+    def get_agent(agent_id: str):
+        if agent_store is not None:
+            a = agent_store.get(agent_id)
+            if a:
+                return _agent_to_dict(a)
+        # 回退派生
+        for a in _derived_agents:
+            if a.id == agent_id:
+                return _agent_to_dict(a)
+        return {"error": f"agent not found: {agent_id}"}
+
+    @app.patch("/api/agents/{agent_id}")
+    def update_agent(agent_id: str, name: str | None = None,
+                     cli: str | None = None, runtime_id: str | None = None,
+                     system_prompt: str | None = None,
+                     skill_names: str | None = None):
+        if agent_store is None:
+            return {"error": "agent store not configured"}
+        fields = {}
+        if name is not None: fields["name"] = name
+        if cli is not None: fields["cli"] = cli
+        if runtime_id is not None: fields["runtime_id"] = runtime_id
+        if system_prompt is not None: fields["system_prompt"] = system_prompt
+        if skill_names is not None:
+            fields["skill_names"] = [s.strip() for s in skill_names.split(",") if s.strip()]
+        try:
+            return _agent_to_dict(agent_store.update(agent_id, **fields))
+        except KeyError as e:
+            return {"error": str(e)}
+
+    @app.post("/api/agents/{agent_id}/skills")
+    def bind_skill(agent_id: str, skill_name: str):
+        if agent_store is None:
+            return {"error": "agent store not configured"}
+        try:
+            return _agent_to_dict(agent_store.bind_skill(agent_id, skill_name))
+        except KeyError as e:
+            return {"error": str(e)}
+
+    @app.delete("/api/agents/{agent_id}/skills/{skill_name}")
+    def unbind_skill(agent_id: str, skill_name: str):
+        if agent_store is None:
+            return {"error": "agent store not configured"}
+        try:
+            return _agent_to_dict(agent_store.unbind_skill(agent_id, skill_name))
+        except KeyError as e:
+            return {"error": str(e)}
 
     # --- Workspaces ---
     @app.get("/api/workspaces")
@@ -3004,18 +3263,19 @@ def main(data_dir: str = "./workspace") -> int:
     member_store = MemberStore(data_dir=data_dir)
     ap_store = AutopilotStore(data_dir=data_dir)
     project_store = ProjectStore(data_dir=data_dir)
-    skills_dir = os.path.join("workspace", "skills", "code-review")
+    agent_store = AgentStore(data_dir=data_dir)
+    skills_dir = os.path.join(data_dir, "skills", "code-review")
     os.makedirs(skills_dir, exist_ok=True)
     skill_md = os.path.join(skills_dir, "SKILL.md")
-    if not os.path.exists(skill_md):
-        with open(skill_md, "w", encoding="utf-8") as f:
-            f.write(EXAMPLE_SKILL_MD)
-    skill_loader = SkillLoader(os.path.join("workspace", "skills"))
+    # 强制覆写示例 skill,保证 demo 使用当前 keywords frontmatter
+    with open(skill_md, "w", encoding="utf-8") as f:
+        f.write(EXAMPLE_SKILL_MD)
+    skill_loader = SkillLoader(os.path.join(data_dir, "skills"))
     scheduler = Scheduler(ap_store, is_, ts, agent_id="agent-1")
     squad_router = SquadRouter(is_, ts)
     daemon = Daemon(is_, ts, ClaudeCliRunner(), runtime_id="rt-1",
                     session_store=ss, hub=hub, skill_loader=skill_loader,
-                    project_store=project_store)
+                    project_store=project_store, agent_store=agent_store)
     clis = PathDetector.detect() or ["claude", "codex"]
     runtime = Runtime(id="rt-1", name="local", clis=clis)
     app = create_console_app(
@@ -3028,6 +3288,7 @@ def main(data_dir: str = "./workspace") -> int:
         daemon=daemon,
         runtime=runtime,
         project_store=project_store,
+        agent_store=agent_store,
     )
     print("mica Mission Control → http://localhost:8000/")
     # 绑定 127.0.0.1(本地):控制台含 /api/fs/browse 会暴露服务端目录结构,

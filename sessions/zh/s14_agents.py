@@ -1,6 +1,6 @@
-"""s15 — Agent Profile(可配置执行主体)
+"""s14 — Agent Profile(可配置执行主体)
 
-本文件是 s01-s15 的累积教学代码。s15 在 s13 的 project/workdir 基础上,把 agent
+本文件是 s01-s14 的累积教学代码。s14 在 s13 的 project/workdir 基础上,把 agent
 从"runtime 派生的不可配置对象"升级为"可配置执行主体":
 
 - Agent 增加 system_prompt(身份/边界/工作方式)和 skill_names(绑定的技能名);
@@ -127,7 +127,7 @@ class RealtimeHub:
 
 # ===========================================================================
 # s08 — Skill + SkillLoader(扫 workspace/skills/**/SKILL.md,frontmatter.keywords 关键词召回)
-# s15:使用 keywords 关键词召回,新增 get(name) 供 agent 绑定解析。
+# s14:使用 keywords 关键词召回,新增 get(name) 供 agent 绑定解析。
 # ===========================================================================
 @dataclass
 class Skill:
@@ -142,7 +142,7 @@ class SkillLoader:
     """扫 workspace/skills/**/SKILL.md,按 frontmatter.keywords 关键词召回。
 
     扫描顺序:sorted glob(recursive)。首个命中即选中(无 keywords 字段的不自动选中)。
-    s15 新增 get(name):按 name 查找(大小写不敏感),供 agent 绑定解析。
+    s14 新增 get(name):按 name 查找(大小写不敏感),供 agent 绑定解析。
     """
 
     def __init__(self, skills_dir: str):
@@ -244,7 +244,7 @@ class Agent:
     name: str
     cli: str = "claude"
     runtime_id: str = "local"
-    # s15:agent 可配置执行主体 —— 身份提示词 + 绑定的技能名。
+    # s14:agent 可配置执行主体 —— 身份提示词 + 绑定的技能名。
     system_prompt: str = ""          # agent 身份/边界/工作方式 -> --append-system-prompt
     skill_names: list[str] = field(default_factory=list)  # 绑定的 skill 名(按 SkillLoader.get 解析)
 
@@ -266,7 +266,7 @@ def _agent_from_dict(d: dict) -> Agent:
 
 
 # ===========================================================================
-# s15 — AgentStore(agents.jsonl snapshot-append,与 ProjectStore 同模式)
+# s14 — AgentStore(agents.jsonl snapshot-append,与 ProjectStore 同模式)
 # ===========================================================================
 class AgentStore:
     """可配置 agent 持久化。data_dir 给定则 agents.jsonl snapshot-append(last-wins 重放)。
@@ -1092,7 +1092,7 @@ class Daemon:
         self.hub = hub
         self.skill_loader = skill_loader
         self.project_store = project_store
-        # s15:agent_store 让 daemon 按 task.assignee_id 查 agent 配置
+        # s14:agent_store 让 daemon 按 task.assignee_id 查 agent 配置
         # (system_prompt + 绑定 skill)。None 时兼容旧逻辑(只 issue 匹配 skill)。
         self.agent_store = agent_store
         self._stop = False
@@ -1162,7 +1162,7 @@ class Daemon:
         self._record(task.id, {"type": "claim", "task_id": task.id,
                                "issue_id": task.issue_id,
                                "agent_id": task.assignee_id})
-        # s15:按 task.assignee_id 查 agent 配置(system_prompt + 绑定 skill)。
+        # s14:按 task.assignee_id 查 agent 配置(system_prompt + 绑定 skill)。
         agent = self.agent_store.get(task.assignee_id) if self.agent_store else None
         system_prompt = agent.system_prompt if agent else ""
         bound: list[Skill] = []
@@ -1308,7 +1308,7 @@ class ClaudeCliRunner:
             skill_body: str | None = None,
             cwd: str | None = None) -> RunResult:
         prompt = issue.title + (f"\n\n{issue.body}" if issue.body else "")
-        # s15:技能正文拼入 user prompt(不进 --append-system-prompt,避免跨轮残留)。
+        # s14:技能正文拼入 user prompt(不进 --append-system-prompt,避免跨轮残留)。
         if skill_body:
             prompt += f"\n\n[Skill]\n{skill_body}"
         if resume_session_id and task.trigger_comment_id:
@@ -2174,7 +2174,7 @@ def main_squad_demo(data_dir=None) -> int:
 
 
 def main(data_dir="./workspace") -> int:
-    """s15 demo:Agent Profile —— 可配置执行主体。
+    """s14 demo:Agent Profile —— 可配置执行主体。
 
     演示两层 skill + agent 隔离:
     1. 装配 stores + SkillLoader(扫示例 skills)+ AgentStore;
@@ -2215,7 +2215,7 @@ def main(data_dir="./workspace") -> int:
     daemon = Daemon(is_, ts, runner, project_store=ps, skill_loader=sl,
                     agent_store=ag)
 
-    print("=== s15 demo: Agent Profile ===")
+    print("=== s14 demo: Agent Profile ===")
     fe = ag.create(
         "agent-fe", "Frontend Agent", cli="claude", runtime_id="rt-1",
         system_prompt="You are a frontend implementation agent. Focus on accessibility and UI consistency.",

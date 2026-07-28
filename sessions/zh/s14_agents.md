@@ -1,10 +1,10 @@
-# s15 — Agent Profile:把 agent 变成可配置执行主体
+# s14 — Agent Profile:把 agent 变成可配置执行主体
 
-s15 解决一个核心问题:**同一个系统里有多个 agent 时,它们为什么不是同一个 CLI 的几个名字?**
+s14 解决一个核心问题:**同一个系统里有多个 agent 时,它们为什么不是同一个 CLI 的几个名字?**
 
 在前面的章节里,task 已经可以派给不同 `assignee_id`,daemon 也能认领 task 并调用 runner。但如果所有 agent 都用同一套提示词、同一组技能、同一种行为边界,那么它们只是“任务收件人”,还不是有明确职责的执行主体。
 
-s15 引入 **Agent Profile**。它让每个 agent 拥有自己的身份提示词和默认技能:
+s14 引入 **Agent Profile**。它让每个 agent 拥有自己的身份提示词和默认技能:
 
 ```text
 Task.assignee_id
@@ -29,7 +29,7 @@ Daemon.execute          执行前按 assignee_id 注入 agent profile
 RecordingRunner         用于观察实际传给 runner 的 prompt/skill 参数
 ```
 
-可以把 s15 理解成这条链路:
+可以把 s14 理解成这条链路:
 
 ```text
 task 派给谁
@@ -41,7 +41,7 @@ task 派给谁
 
 ## 2. Agent:配置主体
 
-s15 扩展了 `Agent`:
+s14 扩展了 `Agent`:
 
 ```python
 @dataclass
@@ -93,7 +93,7 @@ agent = Agent(
 
 ## 3. AgentStore:保存 profile
 
-`AgentStore` 是 s15 新增的存储层。它负责创建、读取、更新 agent,并维护 agent 和 skill name 的绑定关系。
+`AgentStore` 是 s14 新增的存储层。它负责创建、读取、更新 agent,并维护 agent 和 skill name 的绑定关系。
 
 ```python
 class AgentStore:
@@ -127,7 +127,7 @@ create/update/bind/unbind
 
 ## 4. SkillLoader:两种读取方式
 
-s15 沿用 `SKILL.md` 文件作为技能来源。一个 skill 文件长这样:
+s14 沿用 `SKILL.md` 文件作为技能来源。一个 skill 文件长这样:
 
 ```markdown
 ---
@@ -163,7 +163,7 @@ SkillLoader.select(issue)
   例如标题含 review 时命中 code-review
 ```
 
-所以 s15 不是“只靠 issue 自动匹配 skill”,也不是“只靠 agent 固定绑定 skill”。它同时保留两层:
+所以 s14 不是“只靠 issue 自动匹配 skill”,也不是“只靠 agent 固定绑定 skill”。它同时保留两层:
 
 ```text
 agent 绑定 skill   稳定能力
@@ -223,7 +223,7 @@ def merge_skills(bound: list[Skill], matched: Skill | None) -> str:
 
 ## 6. Daemon.execute:profile 的注入点
 
-s15 的关键变化在 `Daemon.execute()`。daemon 认领 task 后,会按 `task.assignee_id` 查 agent:
+s14 的关键变化在 `Daemon.execute()`。daemon 认领 task 后,会按 `task.assignee_id` 查 agent:
 
 ```python
 agent = self.agent_store.get(task.assignee_id) if self.agent_store else None
@@ -278,7 +278,7 @@ skill_body
 
 ## 7. 和 workdir、resume 的关系
 
-s15 没有替换前面章节的能力,而是叠加在执行链路上。
+s14 没有替换前面章节的能力,而是叠加在执行链路上。
 
 daemon 执行一个 task 时,现在会同时处理三类上下文:
 
@@ -303,7 +303,7 @@ agent profile       来自 task.assignee_id -> AgentStore
 运行:
 
 ```bash
-python sessions/zh/s15_agents.py
+python sessions/zh/s14_agents.py
 ```
 
 demo 会创建两个 agent:
@@ -372,7 +372,7 @@ Agent 绑定 skill 和 issue 命中 skill 合并去重
 agent_store=None 时保持兼容
 ```
 
-如果你要判断 s15 是否真的实现了 Agent Profile,最关键的测试不是 CRUD,而是这三个:
+如果你要判断 s14 是否真的实现了 Agent Profile,最关键的测试不是 CRUD,而是这三个:
 
 ```text
 daemon 会把 agent.system_prompt 传给 append_system_prompt
@@ -382,9 +382,9 @@ agent A 的 skill 不会出现在 agent B 的执行上下文里
 
 ## 10. 和 multiCa 的对应关系
 
-s15 是教学版 Agent Profile,它用最少代码表达 multiCa 的几个核心思想:
+s14 是教学版 Agent Profile,它用最少代码表达 multiCa 的几个核心思想:
 
-| 维度 | mica s15 | multiCa |
+| 维度 | mica s14 | multiCa |
 |---|---|---|
 | agent 存储 | `agents.jsonl` | 数据库 agent 记录 |
 | agent 身份 | `Agent.system_prompt` | agent instructions / identity 配置 |
@@ -404,7 +404,7 @@ RecordingRunner 可以直接断言注入结果
 
 multiCa 的生产路径更复杂,因为它需要兼容真实 CLI 的发现规则、工作目录、运行时配置和权限边界。因此它会把 agent identity、skill 文件、runtime 配置等物化到执行环境里,让 CLI 自己在项目目录中读取。
 
-理解 s15 后,再看 multiCa 的 agent/skill/runtime 设计时,重点就不是“字段名字是否一样”,而是这三个问题:
+理解 s14 后,再看 multiCa 的 agent/skill/runtime 设计时,重点就不是“字段名字是否一样”,而是这三个问题:
 
 ```text
 agent 的身份保存在哪里?
@@ -414,7 +414,7 @@ daemon 在执行前如何把这些配置交给 runner 或 CLI?
 
 ## 11. 本章边界
 
-s15 做了:
+s14 做了:
 
 ```text
 Agent.system_prompt
@@ -426,7 +426,7 @@ daemon 按 assignee_id 注入 profile
 RecordingRunner 可观察注入结果
 ```
 
-s15 不做:
+s14 不做:
 
 ```text
 Agent Profile 的 HTTP API
@@ -437,11 +437,11 @@ skill 文件物化到 CLI 原生 skill 目录
 CLAUDE.md / AGENTS.md 生成
 ```
 
-这些边界很重要。s15 的目标是让你学会 agent profile 的最小闭环,不是一次性做完整生产平台。下一章可以在这个基础上把 AgentStore 接进控制台,让用户通过页面创建 agent、编辑 system prompt、绑定 skill,并在创建 issue 时选择真实 agent。
+这些边界很重要。s14 的目标是让你学会 agent profile 的最小闭环,不是一次性做完整生产平台。下一章可以在这个基础上把 AgentStore 接进控制台,让用户通过页面创建 agent、编辑 system prompt、绑定 skill,并在创建 issue 时选择真实 agent。
 
 ## 12. 一句话总结
 
-s15 把 agent 从“任务的 assignee id”提升为“有身份、有默认技能、可被 daemon 注入执行上下文的配置主体”。
+s14 把 agent 从“任务的 assignee id”提升为“有身份、有默认技能、可被 daemon 注入执行上下文的配置主体”。
 
 掌握这一章后,你应该能清楚回答:
 

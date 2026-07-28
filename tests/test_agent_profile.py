@@ -1,4 +1,4 @@
-"""s15 Agent Profile tests — AgentStore / SkillLoader.get / merge_skills / daemon 注入。
+"""s14 Agent Profile tests — AgentStore / SkillLoader.get / merge_skills / daemon 注入。
 
 覆盖:
 - AgentStore CRUD + bind/unbind skill + JSONL 持久化重载
@@ -11,7 +11,7 @@
 """
 import os
 
-from sessions.zh.s15_agents import (
+from sessions.zh.s14_agents import (
     Agent,
     AgentStore,
     Daemon,

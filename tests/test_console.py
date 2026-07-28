@@ -1,4 +1,4 @@
-"""s13 console API tests — TestClient against create_console_app.
+"""s99 Mission Control API tests — TestClient against create_console_app.
 
 Each test builds a fresh in-memory app via _client(tmp_path), so stores never
 leak between tests. Pattern mirrors tests/test_web_panel.py.
@@ -9,7 +9,7 @@ from datetime import timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from sessions.zh.s14_console import (
+from sessions.zh.s99_mission_control import (
     AutopilotStore,
     Daemon,
     EXAMPLE_SKILL_MD,

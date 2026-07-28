@@ -1,4 +1,4 @@
-"""s16 Console Agents Panel tests — API + daemon injection + derived fallback.
+"""s99 Mission Control agent profile tests — API + daemon injection + derived fallback.
 
 覆盖:
 - POST/GET /api/agents 创建 + 列表
@@ -12,7 +12,7 @@ import os
 
 from fastapi.testclient import TestClient
 
-from sessions.zh.s16_console_agents import (
+from sessions.zh.s99_mission_control import (
     Agent,
     AgentStore,
     Daemon,
@@ -51,7 +51,7 @@ class _RecordingRunner:
 
 
 def _client(tmp_path, runner=None, with_agents=True):
-    """装配 s16 app(含 agent_store)。runner 给定则用之(供注入测试)。"""
+    """装配 s99 app(含 agent_store)。runner 给定则用之(供注入测试)。"""
     is_ = IssueStore()
     ts = TaskStore()
     ss = SessionStore(str(tmp_path))
