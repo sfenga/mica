@@ -5,6 +5,7 @@ leak between tests. Pattern mirrors tests/test_web_panel.py.
 """
 import datetime
 import os
+import time
 from datetime import timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -412,3 +413,68 @@ def test_fs_browse_route(tmp_path):
     assert isinstance(res2["dirs"], list)
 
 
+
+
+def test_daemon_start_auto_executes_enqueued_task(tmp_path):
+    client, is_, ts, *_ = _client(tmp_path)
+    status = client.post("/api/daemon/start").json()
+    assert status["running"] is True
+    try:
+        res = client.post(
+            "/api/issues",
+            params={"title": "auto daemon", "assignee_type": "agent", "assignee_id": "agent-1"},
+        )
+        issue_id = res.json()["id"]
+        deadline = datetime.datetime.now(timezone.utc) + timedelta(seconds=2)
+        while datetime.datetime.now(timezone.utc) < deadline:
+            tasks = ts.list(issue_id)
+            if tasks and tasks[0].status.value == "completed":
+                break
+            time.sleep(0.01)
+        assert ts.list(issue_id)[0].status.value == "completed"
+        assert is_.get(issue_id).status == IssueStatus.IN_REVIEW
+    finally:
+        stopped = client.post("/api/daemon/stop").json()
+        assert stopped["running"] is False
+
+
+def test_prepare_and_read_task_execution_context(tmp_path):
+    client, is_, ts, *_ = _client(tmp_path)
+    workdir = tmp_path / "repo"
+    proj = client.post(
+        "/api/projects",
+        params={"name": "repo", "local_path": str(workdir)},
+    ).json()
+    issue = client.post(
+        "/api/issues",
+        params={"title": "context task", "body": "prepare me", "assignee_type": "agent",
+                "assignee_id": "agent-1", "project_id": proj["id"]},
+    ).json()
+    task = ts.list(issue["id"])[0]
+
+    before = client.get(f"/api/tasks/{task.id}/context").json()
+    assert before["prepared"] is False
+
+    prepared = client.post(f"/api/tasks/{task.id}/context/prepare").json()
+    assert prepared["task_id"] == task.id
+    assert "agent-identity.md" in prepared["files"]
+    assert "task-context.md" in prepared["files"]
+    assert prepared["context_dir"].startswith(str(workdir.resolve()))
+
+    after = client.get(f"/api/tasks/{task.id}/context").json()
+    assert after["prepared"] is True
+    assert after["manifest"]["task_id"] == task.id
+
+    file_data = client.get(f"/api/tasks/{task.id}/context/files/task-context.md").json()
+    assert file_data["path"] == "task-context.md"
+    assert "context task" in file_data["content"]
+    assert "prepare me" in file_data["content"]
+
+
+def test_console_html_exposes_daemon_and_context_controls(tmp_path):
+    client, *_ = _client(tmp_path)
+    html = client.get("/").text
+    assert "data-v=\"daemon\"" in html
+    assert "startDaemon" in html
+    assert "prepareContext" in html
+    assert "Execution Context" in html

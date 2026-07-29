@@ -1,14 +1,15 @@
 """s99 — Mission Control(最终集成控制台)
 
-本文件是 s01-s14 的累积教学代码,也是最终观察控制台。s99 集成 s14 的 Agent Profile:
+本文件是 s01-s16 的累积教学代码,也是可操作的本地 Mission Control。它集成:
 
 - Agent 增加 system_prompt / skill_names;AgentStore 持久化(agents.jsonl);
 - SkillLoader 负责从 workspace/skills 读取 SKILL.md,并提供 get(name);
 - Daemon.execute 按 task.assignee_id 查 agent,注入 system_prompt + agent.skill_names 对应的 skill;
+- DaemonWorker 提供后台 start/stop/wakeup,任务入队后可自动执行;
+- ExecutionContextBuilder 把 agent/issue/project/skill 上下文写到 project workdir;
 - API:GET/POST/PATCH /api/agents、/api/agents/{id}/skills 绑定/解绑;
   GET /api/agents 在 AgentStore 为空时回退 runtime.clis 派生(兼容);
-- Mission Control 暴露 Agent Profile:创建 agent、编辑 system_prompt、多选绑 skill;
-  issue 创建表单 assignee 下拉从 /api/agents 来。
+- Mission Control 暴露 Project、Agent、Skill、Issue、Daemon、Task trace 和 context 文件。
 """
 from __future__ import annotations
 
@@ -24,14 +25,21 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Protocol, TypedDict
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from croniter import croniter
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
+
+from sessions.zh.s15_daemon_loop import DaemonWorker
+from sessions.zh.s16_execution_context import ExecutionContextBuilder
 
 
 def now_iso() -> str:
@@ -2115,13 +2123,14 @@ def main(data_dir=None) -> int:
 # ===========================================================================
 # s99 — Mission Control (最终集成控制台)
 # ===========================================================================
-# 本节把 s01-s14 的核心对象集中到本地观察控制台:
+# 本节把 s01-s16 的核心对象集中到本地可操作控制台:
 # - 序列化 helpers(_squad_to_dict / _skill_to_dict / _runtime_to_dict / _member_to_dict)
 # - create_console_app():闭包持有全部 stores/services,暴露本地 API
-# - CONSOLE_HTML:内联 HTML/CSS/JS,用于观察和操作系统对象
+# - CONSOLE_HTML:内联 HTML/CSS/JS,用于创建、执行、观察和调试系统对象
 # - main():内存装配(IssueStore/TaskStore/SessionStore/MemberStore/AutopilotStore
 #           + RealtimeHub + SkillLoader + Scheduler + SquadRouter + Daemon(StubRunner)
-#           + AgentStore + PathDetector → Runtime + agents)→ uvicorn.run(port=8000)
+#           + AgentStore + DaemonWorker + ExecutionContextBuilder
+#           + PathDetector → Runtime + agents)→ uvicorn.run(port=8000)
 # s07 的 create_app / HTML_PAGE 保留为内部 helper,不再作为主入口。
 # ===========================================================================
 
@@ -2349,6 +2358,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <div class="item" data-v="skills">Skills</div>
     <div class="item" data-v="autopilot">Autopilot</div>
     <div class="item" data-v="runtimes">Runtime</div>
+    <div class="item" data-v="daemon">Daemon</div>
     <div class="item" data-v="workspaces">Workspaces</div>
     <div class="item" data-v="squads">Squads</div>
     <div class="item" data-v="projects">Projects</div>
@@ -2367,7 +2377,9 @@ CONSOLE_HTML = """<!DOCTYPE html>
   </div>
 </div>
 <div class="bottom">
-  <button class="btn primary" onclick="runDaemonOnce()">▶ Run daemon once</button>
+  <button class="btn primary" onclick="startDaemon()">▶ Start daemon</button>
+  <button class="btn" onclick="stopDaemon()">■ Stop</button>
+  <button class="btn" onclick="runDaemonOnce()">Run once</button>
   <button class="btn" onclick="autopilotTick()">⏰ Autopilot tick</button>
   <button class="btn" onclick="seedDemo()">📋 Seed demo</button>
   <button class="btn" onclick="resetDemo()">↺ Reset</button>
@@ -2417,6 +2429,8 @@ async function loadView(v){
     cards+=card('Issues', d.issues, JSON.stringify(d.issue_counts||{}));
     cards+=card('Tasks', d.tasks, JSON.stringify(d.task_counts||{}));
     cards+=card('Runtimes', d.runtimes, 'local');
+    const ds=await api('/api/daemon/status');
+    cards+=card('Daemon', ds.running?'running':'stopped', 'queued '+(ds.queued||0)+' · claimed '+(ds.claimed_count||0));
     cards+=card('Autopilots', d.autopilots, 'enabled');
     cards+='</div>';
     let feed='<div class="feed"><b>Recent Activity</b>';
@@ -2463,6 +2477,22 @@ async function loadView(v){
     const a=await api('/api/agents');
     h+='<div class="list-row head"><span>Agent ID</span><span>Name</span><span>CLI</span><span>Tasks</span><span></span></div>';
     a.forEach(x=>{h+='<div class="list-row"><span>'+x.id+'</span><span>'+x.name+'</span><span>'+x.cli+'</span><span>'+x.runtime_id+'</span><span></span></div>';});
+    list.innerHTML=h;
+  } else if(state.view==='daemon'){
+    const d=await api('/api/daemon/status');
+    let h='<div class="cards">';
+    h+=card('Daemon', d.running?'running':'stopped', d.configured?'configured':'not configured');
+    h+=card('Queued', d.queued||0, 'tasks waiting');
+    h+=card('Claimed', d.claimed_count||0, 'total claimed');
+    h+=card('Poll', (d.poll_interval!=null)?(d.poll_interval+'s'):'-', 'fallback interval');
+    h+='</div>';
+    h+='<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">';
+    h+='<button class="btn primary" onclick="startDaemon()">▶ Start daemon</button>';
+    h+='<button class="btn" onclick="stopDaemon()">■ Stop</button>';
+    h+='<button class="btn" onclick="runDaemonOnce()">▶ Run once</button>';
+    h+='<button class="btn" onclick="loadView(&#39;daemon&#39;)">↻ Refresh</button>';
+    h+='</div>';
+    h+='<p style="margin-top:12px;color:var(--muted);font-size:12px">后台 worker 常驻后自动认领 queued task。Start 启动后台 loop;Run once 手动执行单步(调试用)。Stop 只停 worker,不丢已落盘数据。</p>';
     list.innerHTML=h;
   } else if(state.view==='workspaces'){
     const d=await api('/api/workspaces');
@@ -2616,6 +2646,16 @@ async function selectObject(type, id){
       if(data.trigger_comment_id) h+='<div style="margin-bottom:4px"><span class="k">trigger</span> '+esc(data.trigger_comment_id)+'</div>';
       if(data.error) h+='<div style="margin-bottom:4px;color:var(--err)"><span class="k">error</span> '+esc(data.error)+'</div>';
       h+='<div style="margin-bottom:4px"><span class="k">events</span> '+((data.events||[]).length)+' session records</div>';
+      const ctx=data.context||{};
+      h+='<h3>Execution Context</h3>';
+      h+='<div style="margin-bottom:6px"><span class="k">status</span> '+(ctx.prepared?'prepared':'not prepared')+'</div>';
+      h+='<div style="margin-bottom:6px;word-break:break-all"><span class="k">dir</span> '+esc(ctx.context_dir||'-')+'</div>';
+      h+='<button class="btn primary" style="padding:4px 10px;font-size:11px;margin-bottom:8px" onclick="prepareContext(&#39;'+data.id+'&#39;)">Prepare context</button>';
+      if(ctx.files&&ctx.files.length){
+        h+='<div style="margin-top:4px">';
+        ctx.files.forEach(f=>{h+='<a style="display:block;color:var(--accent);cursor:pointer;margin:2px 0" onclick="viewContextFile(&#39;'+data.id+'&#39;,&#39;'+esc(f)+'&#39;)">'+esc(f)+'</a>';});
+        h+='</div><pre id="ctx-file" style="margin-top:8px;max-height:260px"></pre>';
+      }
       h+='</div>';
     }
     el('detail').innerHTML=h;
@@ -2665,7 +2705,13 @@ async function createSquad(e){e.preventDefault();const f=new FormData(e.target);
 async function addMember(e){e.preventDefault();const f=new FormData(e.target);await fetch('/api/workspaces/'+state.ws+'/members?member_id='+encodeURIComponent(f.get('member_id')),{method:'POST'});loadView();}
 async function addComment(e,id){e.preventDefault();const f=new FormData(e.target);await fetch('/api/issues/'+id+'/comments?text='+encodeURIComponent(f.get('text')||''),{method:'POST'});selectObject('issue',id);}
 async function transitionIssue(id,status){try{await fetch('/api/issues/'+id+'/status?status='+status,{method:'PATCH'});loadView();selectObject('issue',id);}catch(e){setStatus('error: '+e.message,'var(--err)');}}
-async function runDaemonOnce(){try{setStatus('running daemon...','var(--info)');const d=await api('/api/daemon/run-once',{method:'POST'});setStatus('daemon ran: '+d.run+' task(s)','var(--ok)');if(state.selType==='issue'&&state.selId){selectObject('issue',state.selId);}else{loadView();}}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function refreshAfterDaemon(){if(state.selType==='task'&&state.selId){selectObject('task',state.selId);}else if(state.selType==='issue'&&state.selId){selectObject('issue',state.selId);}else{loadView();}}
+async function startDaemon(){try{const d=await api('/api/daemon/start',{method:'POST'});setStatus('daemon '+(d.running?'running':'stopped'),'var(--ok)');loadView(state.view);}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function stopDaemon(){try{const d=await api('/api/daemon/stop',{method:'POST'});setStatus('daemon '+(d.running?'running':'stopped'),'var(--warn)');loadView(state.view);}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function wakeupDaemon(){const d=await api('/api/daemon/wakeup',{method:'POST'});setStatus('daemon wakeup · queued '+(d.queued||0),'var(--info)');}
+async function runDaemonOnce(){try{setStatus('running daemon...','var(--info)');const d=await api('/api/daemon/run-once',{method:'POST'});setStatus('daemon ran: '+d.run+' task(s)','var(--ok)');refreshAfterDaemon();}catch(e){setStatus('error: '+e.message,'var(--err)');}}
+async function prepareContext(taskId){try{const d=await api('/api/tasks/'+taskId+'/context/prepare',{method:'POST'});if(d.error){setStatus('context failed: '+d.error,'var(--err)');return;}setStatus('context prepared','var(--ok)');selectObject('task',taskId);}catch(e){setStatus('context failed: '+e.message,'var(--err)');}}
+async function viewContextFile(taskId,path){const d=await api('/api/tasks/'+taskId+'/context/files/'+encodeURIComponent(path));const pre=el('ctx-file');if(!pre)return;if(d.error){pre.textContent=d.error;return;}pre.textContent=d.content||'';}
 async function autopilotTick(){const d=await api('/api/autopilots/tick',{method:'POST'});setStatus('autopilot tick: '+d.triggered,'var(--ok)');loadView();}
 async function seedDemo(){const d=await api('/api/demo/seed',{method:'POST'});setStatus('seeded: '+d.issues+' issues','var(--ok)');loadView();}
 async function resetDemo(){const d=await api('/api/demo/reset',{method:'POST'});setStatus('reset','var(--warn)');loadView();}
@@ -2737,7 +2783,8 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                        scheduler=None, member_store=None,
                        squad_router=None, daemon=None,
                        runtime=None, project_store=None,
-                       agent_store=None) -> FastAPI:
+                       agent_store=None, daemon_worker=None,
+                       context_builder=None) -> FastAPI:
     """构造 Mission Control app;路由闭包持有全部 stores/services。"""
     app = FastAPI(title="mica Mission Control")
 
@@ -2781,6 +2828,45 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     # --- 派生 scheduler(若未注入)---
     if scheduler is None and autopilot_store is not None:
         scheduler = Scheduler(autopilot_store, issue_store, task_store)
+
+    # --- s15/s16:daemon worker + execution context builder ---
+    if daemon_worker is None and daemon is not None:
+        daemon_worker = DaemonWorker(daemon, poll_interval=0.5)
+    if context_builder is None:
+        context_builder = ExecutionContextBuilder(
+            issue_store, task_store, agent_store=agent_store,
+            skill_loader=skill_loader, project_store=project_store)
+
+    def _wakeup_daemon() -> None:
+        if daemon_worker is not None:
+            daemon_worker.wakeup()
+
+    def _task_context_dir(task: Task) -> Path:
+        issue = issue_store.get(task.issue_id)
+        workdir = Path.cwd()
+        if issue and issue.project_id and project_store is not None:
+            project = project_store.get(issue.project_id)
+            if project and project.local_path:
+                workdir = Path(project.local_path)
+        root_name = getattr(context_builder, "context_root_name", ".mica")
+        return workdir.resolve() / root_name / "tasks" / task.id
+
+    def _task_context_summary(task: Task) -> dict:
+        context_dir = _task_context_dir(task)
+        manifest_path = context_dir / "manifest.json"
+        if not manifest_path.exists():
+            return {"prepared": False, "context_dir": str(context_dir), "files": []}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {"files": []}
+        return {
+            "prepared": True,
+            "context_dir": str(context_dir),
+            "manifest_path": str(manifest_path),
+            "files": list(manifest.get("files", [])),
+            "manifest": manifest,
+        }
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -2848,8 +2934,10 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             return {"error": str(e)}
         if assignee_type == "agent" and assignee_id:
             task_store.enqueue(issue.id, assignee_type, assignee_id)
+            _wakeup_daemon()
         elif assignee_type == "squad" and assignee_id and squad_router:
             squad_router.assign_issue_to_squad(issue.id, assignee_id)
+            _wakeup_daemon()
         return _issue_to_dict(issue)
 
     @app.get("/api/issues/{issue_id}")
@@ -2883,6 +2971,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         task = task_store.enqueue(
             issue_id, issue.assignee_type, issue.assignee_id,
             trigger_comment_id=text)
+        _wakeup_daemon()
         return {"issue": _issue_to_dict(issue), "task_id": task.id}
 
     @app.post("/api/issues/{issue_id}/rerun")
@@ -2891,6 +2980,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             task = issue_store.rerun_task(issue_id, task_store)
         except KeyError as e:
             return {"error": str(e)}
+        _wakeup_daemon()
         return {"task_id": task.id}
 
     # --- Tasks ---
@@ -2905,6 +2995,40 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                      if (issue_store.get(t.issue_id)
                          and issue_store.get(t.issue_id).workspace_id == workspace_id)]
         return [_task_to_dict(t) for t in tasks]
+
+    def _daemon_status() -> dict:
+        queued = len([t for t in task_store.list() if t.status.value == "queued"])
+        running = bool(daemon_worker and daemon_worker.running)
+        return {
+            "configured": daemon is not None,
+            "running": running,
+            "claimed_count": getattr(daemon_worker, "claimed_count", 0) if daemon_worker else 0,
+            "poll_interval": getattr(daemon_worker, "poll_interval", None) if daemon_worker else None,
+            "queued": queued,
+        }
+
+    @app.get("/api/daemon/status")
+    def daemon_status():
+        return _daemon_status()
+
+    @app.post("/api/daemon/start")
+    def daemon_start():
+        if daemon_worker is None:
+            return {"error": "daemon worker not configured", **_daemon_status()}
+        daemon_worker.start()
+        return _daemon_status()
+
+    @app.post("/api/daemon/stop")
+    def daemon_stop():
+        if daemon_worker is None:
+            return {"error": "daemon worker not configured", **_daemon_status()}
+        daemon_worker.stop()
+        return _daemon_status()
+
+    @app.post("/api/daemon/wakeup")
+    def daemon_wakeup():
+        _wakeup_daemon()
+        return _daemon_status()
 
     @app.post("/api/daemon/run-once")
     def daemon_run_once():
@@ -2944,7 +3068,48 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             d["events"] = session_store.load(task_id)
         else:
             d["events"] = []
+        d["context"] = _task_context_summary(task)
         return d
+
+    @app.post("/api/tasks/{task_id}/context/prepare")
+    def prepare_task_context(task_id: str):
+        task = task_store.get(task_id)
+        if task is None:
+            return {"error": f"task not found: {task_id}"}
+        if context_builder is None:
+            return {"error": "context builder not configured"}
+        try:
+            ctx = context_builder.build(task)
+        except (KeyError, OSError) as e:
+            return {"error": str(e)}
+        return {
+            "task_id": ctx.task_id,
+            "context_dir": ctx.context_dir,
+            "files": ctx.files,
+            "manifest_path": ctx.manifest_path,
+        }
+
+    @app.get("/api/tasks/{task_id}/context")
+    def get_task_context(task_id: str):
+        task = task_store.get(task_id)
+        if task is None:
+            return {"error": f"task not found: {task_id}"}
+        return _task_context_summary(task)
+
+    @app.get("/api/tasks/{task_id}/context/files/{file_path:path}")
+    def get_task_context_file(task_id: str, file_path: str):
+        task = task_store.get(task_id)
+        if task is None:
+            return {"error": f"task not found: {task_id}"}
+        context_dir = _task_context_dir(task).resolve()
+        target = (context_dir / file_path).resolve()
+        try:
+            target.relative_to(context_dir)
+        except ValueError:
+            return {"error": "invalid context file path"}
+        if not target.exists() or not target.is_file():
+            return {"error": f"context file not found: {file_path}"}
+        return {"path": file_path, "content": target.read_text(encoding="utf-8")}
 
     # --- Realtime ---
     @app.websocket("/ws/issues/{issue_id}")
@@ -3002,6 +3167,8 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         if scheduler is None:
             return {"error": "scheduler not configured", "triggered": 0}
         n = scheduler.tick()
+        if n:
+            _wakeup_daemon()
         return {"triggered": n}
 
     # --- Runtimes & Agents ---
@@ -3136,6 +3303,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                 issue_id, title, assignee_type, assignee_id, stage=stage)
         except KeyError as e:
             return {"error": str(e)}
+        _wakeup_daemon()
         return _issue_to_dict(child)
 
     @app.post("/api/squads/{squad_id}/worker-report")
@@ -3148,6 +3316,8 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                 issue_id, squad_id, worker_agent_id, text)
         except (KeyError, PermissionError) as e:
             return {"error": str(e), "task_id": ""}
+        if task is not None:
+            _wakeup_daemon()
         return {"task_id": task.id if task else "",
                 "reawakened": task is not None}
 

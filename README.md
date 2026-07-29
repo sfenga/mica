@@ -23,7 +23,10 @@ issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude
 | s12 | Squads:leader-first 多 agent 协调 |
 | s13 | Project + workdir:让 agent 在正确代码目录执行 |
 | s14 | Agent Profile:system_prompt + skill 绑定 + daemon 注入 |
-| s99 | Mission Control:最终集成控制台,用于观察和操作全系统 |
+| s15 | Daemon Loop:后台 worker + task wakeup 自动执行 |
+| s16 | Execution Context:把 agent/issue/skill 物化到 workdir |
+| s17 | Runtime Capacity / Slot:先有执行空位,再 claim task |
+| s99 | Mission Control:最终集成控制台,用于操作、执行和观察全系统 |
 
 ## 快速开始
 
@@ -55,7 +58,8 @@ python -m pytest -q
 3. 继续读 s06-s07,观察执行事件如何进入实时通道和 Web 看板。
 4. 读 s08-s10,学习 skills、autopilot、多 CLI 与 runtime 边界。
 5. 读 s11-s14,把系统扩展到 workspace、squad、project workdir 和 agent profile。
-6. 最后运行 s99,用 Mission Control 一次性观察全部对象和流程。
+6. 读 s15-s17,理解后台 daemon loop、runtime 可见的 execution context 和执行容量。
+7. 最后运行 s99,用 Mission Control 创建 issue、启动 daemon、查看 trace 和 context 文件。
 
 ## 安全说明
 
