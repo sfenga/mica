@@ -43,6 +43,7 @@
       <div v-else-if="store.tab === 'projects'" v-scope="ProjectsView()"></div>
       <div v-else-if="store.tab === 'squads'" v-scope="SquadsView()"></div>
       <div v-else-if="store.tab === 'autopilot'" v-scope="AutopilotView()"></div>
+      <div v-else-if="store.tab === 'system'" v-scope="SystemView()"></div>
       <div v-else class="p-8 text-gray-500">{{ currentTabLabel }} coming soon</div>
     </main>
 

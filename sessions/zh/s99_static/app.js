@@ -6,6 +6,7 @@ import { AgentsView, AgentForm, AgentCard } from './components/agents.js';
 import { ProjectsView } from './components/projects.js';
 import { SquadsView } from './components/squads.js';
 import { AutopilotView } from './components/autopilot.js';
+import { SystemView } from './components/system.js';
 
 export const store = reactive({
   tab: 'board',
@@ -20,6 +21,7 @@ export const store = reactive({
   squads: [],
   skills: [],
   autopilots: [],
+  runtimes: [],
   workspaces: [],
   selectedIssueId: null,
   selectedTaskId: null,
@@ -200,5 +202,6 @@ createApp({
   ProjectsView,
   SquadsView,
   AutopilotView,
+  SystemView,
   shortId, esc,
 }).mount('#app');
