@@ -5,6 +5,7 @@ import { QueueView, TaskTable, TracePanel } from './components/queue.js';
 import { AgentsView, AgentForm, AgentCard } from './components/agents.js';
 import { ProjectsView } from './components/projects.js';
 import { SquadsView } from './components/squads.js';
+import { AutopilotView } from './components/autopilot.js';
 
 export const store = reactive({
   tab: 'board',
@@ -198,5 +199,6 @@ createApp({
   AgentsView, AgentForm, AgentCard,
   ProjectsView,
   SquadsView,
+  AutopilotView,
   shortId, esc,
 }).mount('#app');
