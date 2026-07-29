@@ -1,6 +1,6 @@
 # s06 — WebSocket 实时进度
 
-s05 已经能把「评论」变成新的 task,并用上一条 task 的 `session_id` 续会话。到这里,后台执行闭环已经成立:
+s05 已经能把「评论」变成新的 task,并用上一条 task 的 `session_id` 续会话。到这里,手动触发的执行链路已经成立:
 
 ```text
 issue -> task -> daemon 认领 -> runner 执行 -> SessionStore 落盘

@@ -186,7 +186,7 @@ mica s15 不实现这个缓存,但保留同一个思想:先创建 queued task,�
 
 ## 5. mica s15 如何压缩这个模型
 
-mica 没有远程 server、websocket、数据库 claim、runtime 批量调度。s15 把生产系统压缩成两个教学对象。
+s15 这个压缩模型不实现生产级远程 server、WebSocket wakeup、数据库 claim、runtime 批量调度。它只保留后台轮询和 wakeup 标记两个核心概念。
 
 ```text
 WakeupTaskStore

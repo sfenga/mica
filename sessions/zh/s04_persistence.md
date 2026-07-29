@@ -140,7 +140,7 @@ def append(self, task_id: str, event: dict) -> None:
 
 ```text
 历史: SessionStore JSONL
-实时: RealtimeHub / WebSocket
+实时: 后续 s06 的实时通道
 ```
 
 ## 5. orphan: 重启时正在跑的 task 怎么办

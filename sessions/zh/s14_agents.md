@@ -234,5 +234,5 @@ demo 会创建不同 agent,为它们绑定不同 skill,再执行 task。你应�
 agent-fe 只拿到自己的 skill_body
 agent-be 只拿到自己的 skill_body
 issue title/body 不会让未绑定的 skill 被注入
-未配置 profile 的派生 agent 不会得到 skill_body
+未配置 profile 的 assignee 不会得到 system_prompt / skill_body
 ```

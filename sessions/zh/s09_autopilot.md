@@ -245,7 +245,9 @@ python sessions/zh/s09_autopilot.py
 
 demo 会创建一条到期 autopilot,触发后生成 issue + task,再打印看板和 task 数量。
 
-## 10. 和 multiCa 的区别
+## 10. 和 multiCa 的区别（进阶对照）
+
+这一节是进阶对照。第一次读可以先抓四件事:mica 只做本地 cron;multiCa 要处理多触发来源;生产系统必须记录每次 run;分布式调度需要额外的幂等和失败治理。下面的生产名词不用一次背完,先用对照表理解边界即可。
 
 `mica` s09 是一个教学版 cron scheduler:一条 `Autopilot` 规则直接带 `cron`、`agent_id`、`title`、`template` 和 `next_run`,到期后创建 issue 和 queued task。`multiCa` 的生产实现拆得更细,因为它要处理多 workspace、多触发器、多副本调度、审计、幂等和失败治理。
 
