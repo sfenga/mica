@@ -526,7 +526,7 @@ SlotDaemonWorker 没有派发超过 runtime capacity 的 task。
 
 ## 8. 测试在验证什么
 
-s17 的测试文件是 [tests/test_runtime_capacity.py](/Users/admin/code/learning/mica/tests/test_runtime_capacity.py)。
+s17 的测试文件是 [tests/test_runtime_capacity.py](../../tests/test_runtime_capacity.py)。
 
 ### 8.1 slot pool 基本状态
 

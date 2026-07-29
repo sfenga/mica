@@ -17,14 +17,14 @@ Project.local_path
 
 ## 1. 为什么需要 workdir
 
-如果 runner 不指定 `cwd`,Python 的 `subprocess.Popen()` 会继承当前 Python 进程的工作目录。也就是说,你从 `/Users/admin/code/learning/mica` 启动 demo,agent CLI 默认也会在 `mica` 目录里运行。
+如果 runner 不指定 `cwd`,Python 的 `subprocess.Popen()` 会继承当前 Python 进程的工作目录。也就是说,你从 `/path/to/mica` 启动 demo,agent CLI 默认也会在 `mica` 目录里运行。
 
 这对教学前几章没问题,因为 s01-s12 主要学习调度链路,并不真的要求 agent 修改另一个项目。但真实使用中,用户可能希望:
 
 ```text
-issue A -> 在 /Users/admin/code/app-a 里修 bug
-issue B -> 在 /Users/admin/code/app-b 里写测试
-issue C -> 在 /Users/admin/code/docs-site 里改文档
+issue A -> 在 /path/to/app-a 里修 bug
+issue B -> 在 /path/to/app-b 里写测试
+issue C -> 在 /path/to/docs-site 里改文档
 ```
 
 这些任务可以属于同一个 workspace,也可以由同一个 daemon 执行,但它们的代码目录不同。如果没有 workdir,agent 只能继承 daemon 启动目录,就会出现三个问题:
@@ -74,7 +74,7 @@ local_path     本地项目目录;空字符串表示没有显式目录
 repo_url       预留字段,教学版暂不做 checkout
 ```
 
-`local_path` 是本章最重要的字段。它表示 agent 应该进入哪个本地目录执行。这里的路径可以是 `/tmp/mica-app`,也可以是你机器上的真实项目目录,例如 `/Users/admin/code/my-app`。
+`local_path` 是本章最重要的字段。它表示 agent 应该进入哪个本地目录执行。这里的路径可以是 `/tmp/mica-app`,也可以是你机器上的真实项目目录,例如 `/path/to/my-app`。
 
 `repo_url` 目前只是数据占位。完整系统会区分本地目录和远程 repo checkout:s13 只实现 local path 这一条最短链路,让读者先理解 workdir 如何进入 task 执行。
 
