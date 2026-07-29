@@ -35,6 +35,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from croniter import croniter
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
@@ -1414,7 +1415,7 @@ async def _ws_handler(websocket, hub: RealtimeHub) -> None:
 
 async def _ws_server(hub: RealtimeHub, port: int) -> None:
     async with websockets.serve(
-        lambda ws: _ws_handler(ws, hub), "0.0.0.0", port
+        lambda ws: _ws_handler(ws, hub), "127.0.0.1", port
     ):
         await asyncio.Future()  # 永久运行
 
@@ -2716,9 +2717,15 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     return app
 
 
-def main(data_dir: str = "./workspace") -> int:
-    """Wire all stores + ClaudeCliRunner + uvicorn on :8000. Default data_dir=./workspace (JSONL persistence)."""
+def main(data_dir: str | None = None) -> int:
+    """Wire stores + ClaudeCliRunner + uvicorn for the local Mission Control."""
     import uvicorn
+    load_dotenv()
+    data_dir = data_dir or os.getenv("MULTICA_DATA_DIR", "./workspace")
+    web_port = int(os.getenv("MULTICA_WEB_PORT", "8000"))
+    poll_interval = float(os.getenv("MULTICA_POLL_INTERVAL", "0.5"))
+    default_cli = os.getenv("MULTICA_DEFAULT_CLI", "claude")
+    default_agent_id = os.getenv("MULTICA_AGENT_ID", "agent-1")
     os.makedirs(data_dir, exist_ok=True)
     is_ = IssueStore(data_dir=data_dir)
     ts = TaskStore(data_dir=data_dir)
@@ -2735,12 +2742,14 @@ def main(data_dir: str = "./workspace") -> int:
     with open(skill_md, "w", encoding="utf-8") as f:
         f.write(EXAMPLE_SKILL_MD)
     skill_loader = SkillLoader(os.path.join(data_dir, "skills"))
-    scheduler = Scheduler(ap_store, is_, ts, agent_id="agent-1")
+    scheduler = Scheduler(ap_store, is_, ts, agent_id=default_agent_id)
     squad_router = SquadRouter(is_, ts)
-    daemon = Daemon(is_, ts, ClaudeCliRunner(), runtime_id="rt-1",
+    daemon = Daemon(is_, ts, ClaudeCliRunner(default_cli), runtime_id="rt-1",
                     session_store=ss, hub=hub, skill_loader=skill_loader,
                     project_store=project_store, agent_store=agent_store)
-    clis = PathDetector.detect() or ["claude", "codex"]
+    daemon_worker = DaemonWorker(daemon, poll_interval=poll_interval)
+    detected_clis = PathDetector.detect()
+    clis = detected_clis or [default_cli, "codex"]
     runtime = Runtime(id="rt-1", name="local", clis=clis)
     app = create_console_app(
         is_, ts, ss, hub,
@@ -2753,11 +2762,12 @@ def main(data_dir: str = "./workspace") -> int:
         runtime=runtime,
         project_store=project_store,
         agent_store=agent_store,
+        daemon_worker=daemon_worker,
     )
-    print("mica Mission Control → http://localhost:8000/")
+    print(f"mica Mission Control → http://localhost:{web_port}/")
     # 绑定 127.0.0.1(本地):控制台含 /api/fs/browse 会暴露服务端目录结构,
     # 对外开放端口会让任何人浏览你的磁盘。教学场景保持本地绑定。
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=web_port)
     return 0
 
 

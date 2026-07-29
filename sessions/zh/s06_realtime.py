@@ -882,7 +882,7 @@ async def _ws_handler(websocket, hub: RealtimeHub) -> None:
 
 async def _ws_server(hub: RealtimeHub, port: int) -> None:
     async with websockets.serve(
-        lambda ws: _ws_handler(ws, hub), "0.0.0.0", port
+        lambda ws: _ws_handler(ws, hub), "127.0.0.1", port
     ):
         await asyncio.Future()  # 永久运行
 

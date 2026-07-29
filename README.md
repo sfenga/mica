@@ -3,7 +3,9 @@
 渐进式教学仓库,做一个最小可用的 multiCa —— 把 coding agent 变成数字队友:
 issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude`)执行 → 实时回传 → 落盘 → 上看板。
 
-每章一个可直接运行的 Python 文件 + 同名 `.md`,每章只引入一个新概念,前置代码原样保留。这个仓库不是生产系统,而是一个按章节展开的学习项目:用最小代码讲清楚 issue、task、daemon、runtime、workspace、skills、squads、workdir 和控制台如何连接起来。
+每章一个可直接运行的 Python 文件 + 同名 `.md`,每章只引入一个新概念,前置代码原样保留。这个仓库不是生产系统,而是一个按章节展开的本地学习项目:用最小代码讲清楚 issue、task、daemon、runtime、workspace、skills、squads、workdir 和控制台如何连接起来。
+
+> 定位:mica 默认只面向本机使用。所有 Web/WS demo 都应监听 `127.0.0.1`,不要暴露到局域网或公网。
 
 ## 章节索引
 
@@ -51,6 +53,8 @@ python -m pytest -q
 
 > s03 起如果使用真实 `ClaudeCliRunner`,需本机已安装并登录 `claude`(Claude Code)。大多数测试和 demo 默认使用 `StubRunner`,不依赖真实 CLI。
 
+`s99_mission_control.py` 会读取 `.env` 中的 `MULTICA_DATA_DIR`、`MULTICA_WEB_PORT`、`MULTICA_POLL_INTERVAL`、`MULTICA_DEFAULT_CLI` 和 `MULTICA_AGENT_ID`。早期章节保持单文件教学风格,主要通过代码里的默认值演示概念。
+
 ## 推荐学习路线
 
 1. 先读 s01-s02,理解 issue 与 task 为什么分层。
@@ -63,9 +67,10 @@ python -m pytest -q
 
 ## 安全说明
 
-- 本项目是本地教学项目,不要把控制台对公网暴露。
-- `s99_mission_control.py` 默认绑定 `127.0.0.1`;如果改成 `0.0.0.0`,目录浏览 API 会暴露服务端目录结构。
-- `ClaudeCliRunner` 为了教学自动化默认使用 `--permission-mode bypassPermissions`;只在可信本地目录和可信任务上运行真实 CLI。
+- 本项目是本地教学项目,不要把控制台对局域网或公网暴露。
+- 各章 Web/WS demo 默认应绑定 `127.0.0.1`;如果你手动改成 `0.0.0.0`,等同于把本机控制台暴露给其他机器。
+- `s99_mission_control.py` 的目录浏览 API(`/api/fs/browse`)用于本机选择 project workdir。它会暴露本机目录结构,仅适合可信本机浏览器访问。
+- `ClaudeCliRunner` 为了教学自动化默认使用 `--permission-mode bypassPermissions`;这会让 Claude Code 自动批准工具调用。只在可信代码目录和你自己创建的可信任务上运行真实 CLI。
 - `workspace/` 是运行时数据目录,默认已被 `.gitignore` 忽略。
 
 ## 仓库结构

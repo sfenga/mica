@@ -3,11 +3,11 @@
 > 实现清单。apply 阶段照此勾选。每章一个 `.py` + `.md`,前置代码原样保留。章数弹性。
 
 ## 0. 仓库骨架
-- [ ] 0.1 `README.md`(项目说明 + 章节索引 + 快速开始)
-- [ ] 0.2 `.env.example`(`MULTICA_DEFAULT_CLI`/`POLL_INTERVAL`/`DATA_DIR`/`WS_PORT`/`WEB_PORT`/`AGENT_ID`)
-- [ ] 0.3 `requirements.txt`(python-dotenv/websockets/croniter/fastapi/uvicorn/httpx/pytest)
-- [ ] 0.4 `.gitignore`(`.venv/`、`workspace/`、`__pycache__/`)
-- [ ] 0.5 `conftest.py` + `sessions/__init__.py` + `sessions/zh/__init__.py`(tests 导入用)
+- [x] 0.1 `README.md`(项目说明 + 章节索引 + 快速开始)
+- [x] 0.2 `.env.example`(`MULTICA_DEFAULT_CLI`/`MULTICA_POLL_INTERVAL`/`MULTICA_DATA_DIR`/`MULTICA_WEB_PORT`/`MULTICA_AGENT_ID`)
+- [x] 0.3 `requirements.txt`(python-dotenv/websockets/croniter/fastapi/uvicorn/httpx/pytest)
+- [x] 0.4 `.gitignore`(`.venv/`、`workspace/`、`__pycache__/`)
+- [x] 0.5 `conftest.py` + `sessions/__init__.py` + `sessions/zh/__init__.py`(tests 导入用)
 
 ## 1. s01 — Issue 模型 + 7 态状态机 + 多态 assignee + 看板
 - [x] 1.1 `Issue`/`Agent`/`Member`/`Workspace` dataclass;`IssueStatus ∈ {backlog, todo, in_progress, in_review, done, blocked, cancelled}`;`assignee_type ∈ {member, agent}`
@@ -49,7 +49,7 @@
 
 ## 6. s06 — WebSocket 实时
 - [x] 6.1 `RealtimeHub`:task/issue→订阅者集合;`publish(id, event)` 推给所有订阅者
-- [x] 6.2 daemon `on_event` 调 hub.publish;WS server 在 `MULTICA_WS_PORT`
+- [x] 6.2 daemon `on_event` 调 hub.publish;WS server 默认监听本机 `127.0.0.1`
 - [x] 6.3 终端客户端 `task watch <id>`:连 WS、订阅、实时打印
 - [x] 6.4 晚到订阅者不获历史回放(历史走 s04 JSONL,daemon 不缓冲);`tests/test_realtime.py`
 - [x] 6.5 `s06_realtime.md`
@@ -57,7 +57,7 @@
 ## 7. s07 — FastAPI 单页看板
 - [x] 7.1 `GET /`(单页 HTML,内联 JS,无构建);`GET /api/issues` 列 issue
 - [x] 7.2 `POST /api/issues` 创建+入队 task;`PATCH /api/issues/{id}/status` 状态机校验转移(复用 s01);`POST /api/issues/{id}/comments` 评论入队 follow-up task;`WS /ws/issues/{id}` 复用 RealtimeHub
-- [x] 7.3 页面:issue 行表 + 创建表单 + 行内状态转移 + 评论框 + 选中行实时进度;`uvicorn` 起 `MULTICA_WEB_PORT`
+- [x] 7.3 页面:issue 行表 + 创建表单 + 行内状态转移 + 评论框 + 选中行实时进度;Web demo 默认监听本机 `127.0.0.1`
 - [x] 7.4 `tests/test_web_panel.py`(创建/状态转移/评论各合法与非法路径)
 - [x] 7.5 `s07_web_panel.md`
 
@@ -69,34 +69,34 @@
 - [x] 8.5 `tests/test_skill_loader.py`;`s08_skills.md`
 
 ## 9. s09 — Autopilot(cron)
-- [ ] 9.1 `Scheduler`:croniter 解析 cron,算 next_run,每 tick 检查到期
-- [ ] 9.2 到期:建 issue(指派 agent)+ 入队 task,进正常认领
-- [ ] 9.3 配置 `workspace/autopilots.jsonl`(字段 `id`/`cron`/`agent_id`/`title`/`template`/`next_run`/`fail_count`/`enabled`/`timezone`)
-- [ ] 9.4 失败语义:到期后无论成败推进 next_run 并落盘;成功清零 fail_count;连续 5 次失败置 enabled=false;禁用后手动改 enabled=true 恢复;cron 默认 UTC 可配 timezone;重启不重触发已过槽位
-- [ ] 9.5 `tests/test_autopilot.py`;`s09_autopilot.md`
+- [x] 9.1 `Scheduler`:croniter 解析 cron,算 next_run,每 tick 检查到期
+- [x] 9.2 到期:建 issue(指派 agent)+ 入队 task,进正常认领
+- [x] 9.3 配置 `workspace/autopilots.jsonl`(字段 `id`/`cron`/`agent_id`/`title`/`template`/`next_run`/`fail_count`/`enabled`/`timezone`)
+- [x] 9.4 失败语义:到期后无论成败推进 next_run 并落盘;成功清零 fail_count;连续 5 次失败置 enabled=false;禁用后手动改 enabled=true 恢复;cron 默认 UTC 可配 timezone;重启不重触发已过槽位
+- [x] 9.5 `tests/test_autopilot.py`;`s09_autopilot.md`
 
 ## 10. s10 — 多 CLI + PATH 探测(1 daemon : N agent)
-- [ ] 10.1 `PathDetector`:探测 PATH 上 `claude`/`codex`/…,返回可用 CLI 列表
-- [ ] 10.2 `MultiCliRunner`:按 `agent.cli` 分派到对应 runner;缺失 CLI 报错不派活
-- [ ] 10.3 `Runtime` 实体:daemon 机器 + 可用 CLI 列表;`Agent.runtime_id` 指向 runtime
-- [ ] 10.4 重构 `Daemon` 为 1:N:持 `runtime_id`;`claim` 过滤改为「task 对应 agent 的 `runtime_id == self.runtime_id`」;认领后按 agent.cli 经 MultiCliRunner 分派
-- [ ] 10.5 `tests/test_path_detect.py` + `tests/test_multidaemon.py`(一 daemon 多 agent+按 cli 分派;同 runtime 双 daemon 抢同一 task 只一个赢;跨 runtime 不串);`s10_multicli.md`
+- [x] 10.1 `PathDetector`:探测 PATH 上 `claude`/`codex`/…,返回可用 CLI 列表
+- [x] 10.2 `MultiCliRunner`:按 `agent.cli` 分派到对应 runner;缺失 CLI 报错不派活
+- [x] 10.3 `Runtime` 实体:daemon 机器 + 可用 CLI 列表;`Agent.runtime_id` 指向 runtime
+- [x] 10.4 重构 `Daemon` 为 1:N:持 `runtime_id`;`claim` 过滤改为「task 对应 agent 的 `runtime_id == self.runtime_id`」;认领后按 agent.cli 经 MultiCliRunner 分派
+- [x] 10.5 `tests/test_multicli.py`(一 daemon 多 agent+按 cli 分派;同 runtime 双 daemon 抢同一 task 只一个赢;跨 runtime 不串);`s10_multicli.md`
 
 ## 11. s11 — 多 workspace 隔离
-- [ ] 11.1 `WorkspaceScope`:每条 issue/task 查询带 `workspace_id` 过滤 + 成员资格闸门(当前 member 须属该空间,非成员拒)
-- [ ] 11.2 CLI/web 用 `X-Workspace-ID`/`--workspace` 选空间 + `X-Member-ID`/`MULTICA_MEMBER_ID` 标识 member
-- [ ] 11.3 `workspace/workspaces.jsonl`(注册表)+ `workspace/members.jsonl`(每空间 member 列表)
-- [ ] 11.4 `tests/test_workspace_isolation.py` + `tests/test_membership_gate.py`;`s11_workspaces.md`
+- [x] 11.1 `WorkspaceScope`:每条 issue/task 查询带 `workspace_id` 过滤 + 成员资格闸门(当前 member 须属该空间,非成员拒)
+- [x] 11.2 Web/API 用 `workspace_id` + `member_id` 标识当前空间和成员(教学版用 query/form 参数)
+- [x] 11.3 `workspace/members.jsonl` 持久化成员关系;workspace 注册表在教学控制台中内存维护
+- [x] 11.4 `tests/test_workspace_isolation.py` + `tests/test_membership_gate.py`;`s11_workspaces.md`
 
 ## 12. s12(可选附录)— Squads
-- [ ] 12.1 `SquadRouter`:leader agent 把 issue 委派给成员 agent
-- [ ] 12.2 派给 squad 的 issue 由 leader 选成员 → 子 issue/task 派活
-- [ ] 12.3 `s12_squads.md`(标注可选、非主线)
+- [x] 12.1 `SquadRouter`:leader agent 把 issue 委派给成员 agent
+- [x] 12.2 派给 squad 的 issue 由 leader 选成员 → 子 issue/task 派活
+- [x] 12.3 `s12_squads.md`(标注可选、非主线)
 
 ## 13. 文档与全局验证
-- [ ] 13.1 `docs/explain/`(架构总览、issue/task 生命周期、daemon、realtime、agent-runner)
-- [ ] 13.2 `README.md` 章节索引与"前置:`claude` 已装"说明
-- [ ] 13.3 全章 `py_compile` 通过
-- [ ] 13.4 `tests/` 全绿
+- [x] 13.1 `docs/wiki/`(架构总览、issue/task 生命周期、daemon、realtime、agent-runner)
+- [x] 13.2 `README.md` 章节索引与"前置:`claude` 已装"说明
+- [x] 13.3 全章 `py_compile` 通过
+- [x] 13.4 `tests/` 全绿
 - [ ] 13.5 `openspec validate add-mica-core` 通过
 - [ ] 13.6 在线验证(需 `claude`):建 issue+task → 认领 → 流式 → 落盘 → issue in_review → 评论 → follow-up task → resume → 完成
