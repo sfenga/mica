@@ -4,6 +4,7 @@ import { BoardView, KanbanColumn, IssueCard, IssueDrawer } from './components/bo
 import { QueueView, TaskTable, TracePanel } from './components/queue.js';
 import { AgentsView, AgentForm, AgentCard } from './components/agents.js';
 import { ProjectsView } from './components/projects.js';
+import { SquadsView } from './components/squads.js';
 
 export const store = reactive({
   tab: 'board',
@@ -196,5 +197,6 @@ createApp({
   QueueView, TaskTable, TracePanel,
   AgentsView, AgentForm, AgentCard,
   ProjectsView,
+  SquadsView,
   shortId, esc,
 }).mount('#app');
