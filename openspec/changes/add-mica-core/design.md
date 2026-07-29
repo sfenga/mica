@@ -2,8 +2,8 @@
 
 ## 目标与约束
 
-- 每章 `sessions/zh/sNN_xxx.py` 一个文件、可直接 `python sessions/zh/sNN.py` 运行,不跨章 import,复现各章核心算法。
-- 每章只引入一个新概念,前置代码原样保留;章数弹性。
+- 早期章节按 `sessions/zh/sNN_xxx.py` 一个文件、可直接 `python sessions/zh/sNN.py` 运行来复现核心算法;s01-s14 主要保持不跨章 import 的快照式教学。
+- 每章只引入一个新概念,前置代码原样保留;章数弹性。当前实现中 s15-s17 进入执行层扩展阶段,会复用前章对象来讲后台 worker、execution context 和 runtime slot。
 - s03 起 agent 执行为真实 `claude` CLI 调真实模型;不用 Anthropic API 假装 agent。
 - JSONL + 内存持久化,不引 PostgreSQL;s02 stub 使认领循环单测不花钱、不依赖 CLI。
 

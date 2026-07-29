@@ -3,7 +3,7 @@
 渐进式教学仓库,做一个最小可用的 multiCa —— 把 coding agent 变成数字队友:
 issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude`)执行 → 实时回传 → 落盘 → 上看板。
 
-每章一个可直接运行的 Python 文件 + 同名 `.md`,每章只引入一个新概念,前置代码原样保留。这个仓库不是生产系统,而是一个按章节展开的本地学习项目:用最小代码讲清楚 issue、task、daemon、runtime、workspace、skills、squads、workdir 和控制台如何连接起来。
+每章一个可直接运行的 Python 文件 + 同名 `.md`,每章只引入一个新概念。s01-s14 基本保留“前置代码原样快照”的教学风格;s15-s17 进入执行层扩展,会复用前章对象来讲后台 worker、execution context 和 runtime slot。这个仓库不是生产系统,而是一个按章节展开的本地学习项目:用最小代码讲清楚 issue、task、daemon、runtime、workspace、skills、squads、workdir 和控制台如何连接起来。
 
 > 定位:mica 默认只面向本机使用。所有 Web/WS demo 都应监听 `127.0.0.1`,不要暴露到局域网或公网。
 
@@ -53,7 +53,7 @@ python -m pytest -q
 
 > s03 起如果使用真实 `ClaudeCliRunner`,需本机已安装并登录 `claude`(Claude Code)。大多数测试和 demo 默认使用 `StubRunner`,不依赖真实 CLI。
 
-`s99_mission_control.py` 会读取 `.env` 中的 `MULTICA_DATA_DIR`、`MULTICA_WEB_PORT`、`MULTICA_POLL_INTERVAL`、`MULTICA_DEFAULT_CLI` 和 `MULTICA_AGENT_ID`。早期章节保持单文件教学风格,主要通过代码里的默认值演示概念。
+`s99_mission_control.py` 会读取 `.env` 中的 `MULTICA_DATA_DIR`、`MULTICA_WEB_PORT`、`MULTICA_POLL_INTERVAL`、`MULTICA_MAX_SLOTS`、`MULTICA_DEFAULT_CLI` 和 `MULTICA_AGENT_ID`。早期章节保持单文件教学风格,主要通过代码里的默认值演示概念。
 
 ## 推荐学习路线
 
@@ -63,7 +63,7 @@ python -m pytest -q
 4. 读 s08-s10,学习 skills、autopilot、多 CLI 与 runtime 边界。
 5. 读 s11-s14,把系统扩展到 workspace、squad、project workdir 和 agent profile。
 6. 读 s15-s17,理解后台 daemon loop、runtime 可见的 execution context 和执行容量。
-7. 最后运行 s99,用 Mission Control 创建 issue、启动 daemon、查看 trace 和 context 文件。
+7. 最后运行 s99,用 Mission Control 创建 issue、启动 daemon、查看 trace、context 文件和 runtime slot 状态。
 
 ## 安全说明
 

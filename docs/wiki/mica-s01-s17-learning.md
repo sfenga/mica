@@ -496,7 +496,7 @@ daemon 执行 task 时解析 issue、project、agent 和 skill。s16 可以把�
 5. 读 s11-s12,把系统从单用户单 agent 扩展到 workspace 和 squad 协作。
 6. 读 s13-s14,理解 project workdir、agent profile 和 agent-bound skills。
 7. 读 s15-s17,理解 daemon 常驻执行、execution context 和 runtime capacity。
-8. 最后运行 s99 Mission Control,把 Project、Agent、Skill、Issue、Daemon、Task trace 和 Context 文件串起来操作一遍。
+8. 最后运行 s99 Mission Control,把 Project、Agent、Skill、Issue、Daemon、Runtime slots、Task trace 和 Context 文件串起来操作一遍。
 
 每章都建议同时看三类文件:
 

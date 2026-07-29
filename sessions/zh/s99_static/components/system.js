@@ -22,10 +22,12 @@ const SystemViewTemplate = `
   <div @vue:mounted="mounted" class="h-full overflow-auto space-y-6">
     <section class="bg-white border rounded-lg p-4">
       <h2 class="text-lg font-semibold mb-3">Daemon</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
         <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Status</div><div class="font-semibold" :class="store.daemon.running ? 'text-emerald-600' : 'text-gray-600'">{{ store.daemon.running ? 'running' : 'stopped' }}</div></div>
         <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Queued</div><div class="font-semibold">{{ store.daemon.queued }}</div></div>
         <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Claimed</div><div class="font-semibold">{{ store.daemon.claimed_count }}</div></div>
+        <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Completed</div><div class="font-semibold">{{ store.daemon.completed_count || 0 }}</div></div>
+        <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Slots</div><div class="font-semibold">{{ store.daemon.slots ? store.daemon.slots.available : 0 }} / {{ store.daemon.slots ? store.daemon.slots.max_slots : 0 }}</div></div>
         <div class="bg-gray-50 rounded-lg p-3"><div class="text-xs text-gray-500 uppercase">Poll</div><div class="font-semibold">{{ store.daemon.poll_interval != null ? store.daemon.poll_interval + 's' : '-' }}</div></div>
       </div>
       <div v-scope="DaemonControls()"></div>
@@ -34,6 +36,19 @@ const SystemViewTemplate = `
     <section class="bg-white border rounded-lg p-4">
       <h2 class="text-lg font-semibold mb-3">Runtimes</h2>
       <div v-for="r in store.runtimes" :key="r.id" class="font-mono text-sm mb-2">{{ r.name }} ({{ r.id }}) — CLIs: {{ (r.clis || []).join(', ') }}</div>
+      <div class="mt-4 border-t pt-3">
+        <div class="text-xs text-gray-500 uppercase mb-2">Runtime slots</div>
+        <div v-if="store.daemon.slots && store.daemon.slots.configured" class="space-y-2">
+          <div class="text-sm font-mono">runtime={{ store.daemon.slots.runtime_id }} · max={{ store.daemon.slots.max_slots }} · available={{ store.daemon.slots.available }}</div>
+          <div v-if="store.daemon.slots.occupied && store.daemon.slots.occupied.length" class="grid gap-2">
+            <div v-for="s in store.daemon.slots.occupied" :key="s.slot_id" class="text-xs font-mono bg-amber-50 border border-amber-200 rounded-md p-2">
+              slot {{ s.slot_id }} → task {{ s.task_id || '(reserved)' }}
+            </div>
+          </div>
+          <div v-else class="text-sm text-gray-500">no occupied slots</div>
+        </div>
+        <div v-else class="text-sm text-gray-500">slot pool not configured</div>
+      </div>
     </section>
 
     <section class="bg-white border rounded-lg p-4">

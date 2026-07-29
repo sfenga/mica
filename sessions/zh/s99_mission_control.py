@@ -1,15 +1,16 @@
 """s99 — Mission Control(最终集成控制台)
 
-本文件是 s01-s16 的累积教学代码,也是可操作的本地 Mission Control。它集成:
+本文件是 s01-s17 的累积教学代码,也是可操作的本地 Mission Control。它集成:
 
 - Agent 增加 system_prompt / skill_names;AgentStore 持久化(agents.jsonl);
 - SkillLoader 负责从 workspace/skills 读取 SKILL.md,并提供 get(name);
 - Daemon.execute 按 task.assignee_id 查 agent,注入 system_prompt + agent.skill_names 对应的 skill;
-- DaemonWorker 提供后台 start/stop/wakeup,任务入队后可自动执行;
+- SlotDaemonWorker 提供后台 start/stop/wakeup,并在 claim 前检查 runtime slot;
 - ExecutionContextBuilder 把 agent/issue/project/skill 上下文写到 project workdir;
 - API:GET/POST/PATCH /api/agents、/api/agents/{id}/skills 绑定/解绑;
   GET /api/agents 在 AgentStore 为空时回退 runtime.clis 派生(兼容);
-- Mission Control 暴露 Project、Agent、Skill、Issue、Daemon、Task trace 和 context 文件。
+- Mission Control 暴露 Project、Agent、Skill、Issue、Daemon、Runtime slots、
+  Task trace 和 context 文件。
 """
 from __future__ import annotations
 
@@ -40,8 +41,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 
-from sessions.zh.s15_daemon_loop import DaemonWorker
 from sessions.zh.s16_execution_context import ExecutionContextBuilder
+from sessions.zh.s17_runtime_capacity import RuntimeSlotPool, SlotDaemonWorker
 
 
 def now_iso() -> str:
@@ -2011,12 +2012,12 @@ def main(data_dir=None) -> int:
 # ===========================================================================
 # s99 — Mission Control (最终集成控制台)
 # ===========================================================================
-# 本节把 s01-s16 的核心对象集中到本地可操作控制台:
+# 本节把 s01-s17 的核心对象集中到本地可操作控制台:
 # - 序列化 helpers(_squad_to_dict / _skill_to_dict / _runtime_to_dict / _member_to_dict)
 # - create_console_app():闭包持有全部 stores/services,暴露本地 API + 静态前端(s99_static/)
 # - main():内存装配(IssueStore/TaskStore/SessionStore/MemberStore/AutopilotStore
 #           + RealtimeHub + SkillLoader + Scheduler + SquadRouter + Daemon(StubRunner)
-#           + AgentStore + DaemonWorker + ExecutionContextBuilder
+#           + AgentStore + RuntimeSlotPool + SlotDaemonWorker + ExecutionContextBuilder
 #           + PathDetector → Runtime + agents)→ uvicorn.run(port=8000)
 # s07 的 create_app / HTML_PAGE 保留为内部 helper,不再作为主入口.
 # ===========================================================================
@@ -2049,6 +2050,23 @@ def _skill_to_dict(s: "Skill") -> dict:
 
 def _runtime_to_dict(r: "Runtime") -> dict:
     return {"id": r.id, "name": r.name, "clis": list(r.clis)}
+
+
+def _slot_pool_to_dict(pool: "RuntimeSlotPool | None") -> dict:
+    if pool is None:
+        return {"configured": False, "runtime_id": "", "max_slots": 0,
+                "available": 0, "occupied": []}
+    occupied = [
+        {"slot_id": slot.id, "runtime_id": slot.runtime_id, "task_id": slot.task_id}
+        for slot in pool.occupied().values()
+    ]
+    return {
+        "configured": True,
+        "runtime_id": pool.runtime_id,
+        "max_slots": pool.max_slots,
+        "available": pool.available(),
+        "occupied": sorted(occupied, key=lambda x: x["slot_id"]),
+    }
 
 
 def _member_to_dict(m: "Member") -> dict:
@@ -2104,6 +2122,7 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
                        squad_router=None, daemon=None,
                        runtime=None, project_store=None,
                        agent_store=None, daemon_worker=None,
+                       slot_pool: RuntimeSlotPool | None = None,
                        context_builder=None) -> FastAPI:
     """构造 Mission Control app;路由闭包持有全部 stores/services。"""
     app = FastAPI(title="mica Mission Control")
@@ -2149,9 +2168,16 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
     if scheduler is None and autopilot_store is not None:
         scheduler = Scheduler(autopilot_store, issue_store, task_store)
 
-    # --- s15/s16:daemon worker + execution context builder ---
+    # --- s15-s17:slot-aware daemon worker + execution context builder ---
+    if slot_pool is None and daemon_worker is not None:
+        slot_pool = getattr(daemon_worker, "slot_pool", None)
+    if slot_pool is None and runtime is not None:
+        slot_pool = RuntimeSlotPool(runtime.id, max_slots=1)
     if daemon_worker is None and daemon is not None:
-        daemon_worker = DaemonWorker(daemon, poll_interval=0.5)
+        if slot_pool is None:
+            runtime_id = getattr(daemon, "runtime_id", "local")
+            slot_pool = RuntimeSlotPool(runtime_id, max_slots=1)
+        daemon_worker = SlotDaemonWorker(daemon, slot_pool, poll_interval=0.5)
     if context_builder is None:
         context_builder = ExecutionContextBuilder(
             issue_store, task_store, agent_store=agent_store,
@@ -2319,8 +2345,10 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
             "configured": daemon is not None,
             "running": running,
             "claimed_count": getattr(daemon_worker, "claimed_count", 0) if daemon_worker else 0,
+            "completed_count": getattr(daemon_worker, "completed_count", 0) if daemon_worker else 0,
             "poll_interval": getattr(daemon_worker, "poll_interval", None) if daemon_worker else None,
             "queued": queued,
+            "slots": _slot_pool_to_dict(slot_pool),
         }
 
     @app.get("/api/daemon/status")
@@ -2493,6 +2521,10 @@ def create_console_app(issue_store: IssueStore, task_store: TaskStore,
         if runtime is None:
             return []
         return [_runtime_to_dict(runtime)]
+
+    @app.get("/api/runtime/slots")
+    def runtime_slots():
+        return _slot_pool_to_dict(slot_pool)
 
     @app.get("/api/agents")
     def list_agents():
@@ -2724,6 +2756,7 @@ def main(data_dir: str | None = None) -> int:
     data_dir = data_dir or os.getenv("MULTICA_DATA_DIR", "./workspace")
     web_port = int(os.getenv("MULTICA_WEB_PORT", "8000"))
     poll_interval = float(os.getenv("MULTICA_POLL_INTERVAL", "0.5"))
+    max_slots = int(os.getenv("MULTICA_MAX_SLOTS", "1"))
     default_cli = os.getenv("MULTICA_DEFAULT_CLI", "claude")
     default_agent_id = os.getenv("MULTICA_AGENT_ID", "agent-1")
     os.makedirs(data_dir, exist_ok=True)
@@ -2747,10 +2780,11 @@ def main(data_dir: str | None = None) -> int:
     daemon = Daemon(is_, ts, ClaudeCliRunner(default_cli), runtime_id="rt-1",
                     session_store=ss, hub=hub, skill_loader=skill_loader,
                     project_store=project_store, agent_store=agent_store)
-    daemon_worker = DaemonWorker(daemon, poll_interval=poll_interval)
     detected_clis = PathDetector.detect()
     clis = detected_clis or [default_cli, "codex"]
     runtime = Runtime(id="rt-1", name="local", clis=clis)
+    slot_pool = RuntimeSlotPool(runtime.id, max_slots=max_slots)
+    daemon_worker = SlotDaemonWorker(daemon, slot_pool, poll_interval=poll_interval)
     app = create_console_app(
         is_, ts, ss, hub,
         skill_loader=skill_loader,
@@ -2763,6 +2797,7 @@ def main(data_dir: str | None = None) -> int:
         project_store=project_store,
         agent_store=agent_store,
         daemon_worker=daemon_worker,
+        slot_pool=slot_pool,
     )
     print(f"mica Mission Control → http://localhost:{web_port}/")
     # 绑定 127.0.0.1(本地):控制台含 /api/fs/browse 会暴露服务端目录结构,

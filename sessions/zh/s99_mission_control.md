@@ -1,15 +1,16 @@
 # s99 — Mission Control:把学习系统变成可操作控制台
 
-s99 的目标不是再发明一个核心模型,而是把 s01-s16 的能力接到一个本地 Web 控制台里。学习者可以不写 Python 调用代码,直接在页面上完成一条真实流程:
+s99 的目标不是再发明一个核心模型,而是把 s01-s17 的能力接到一个本地 Web 控制台里。学习者可以不写 Python 调用代码,直接在页面上完成一条真实流程:
 
 ```text
 创建 Project
   -> 创建/编辑 Agent Profile
   -> 绑定 Agent skills
   -> 创建 Issue 并指定 assignee
-  -> 后台 daemon 自动执行 task
+  -> runtime slot 可用后后台 daemon claim 并执行 task
   -> 查看 trace/events
   -> 准备并查看 Execution Context 文件
+  -> 在 System 页观察 runtime slot 占用和释放
 ```
 
 这就是 Mission Control 的定位:它既是操作入口,也是系统理解工具。每个按钮背后都对应前面章节的一个对象或一条数据流。
@@ -17,13 +18,13 @@ s99 的目标不是再发明一个核心模型,而是把 s01-s16 的能力接到
 ## 1. 控制台集成了哪些能力
 
 ```text
-s01-s04  Issue / Task / Daemon / Runner      任务从创建到执行的主线
-s05-s07  Runtime / Session / MultiCliRunner  CLI runtime、会话续接和执行事件
-s08-s10  Project / Workspace / Autopilot     项目工作目录、成员边界和定时触发
-s11-s12  SquadRouter                         leader-first 多 agent 协作
-s13-s14  AgentStore / SkillLoader            agent profile 与 agent-bound skills
-s15      DaemonWorker                        常驻后台消费 queued task
-s16      ExecutionContextBuilder             把 task 执行上下文写入 workdir
+s01-s04  Issue / Task / Daemon / Runner / Persistence     任务从创建到执行和落盘
+s05-s07  Comment resume / Realtime / Web panel            续跑、事件流和基础看板
+s08-s10  SkillLoader / Autopilot / Runtime + CLI          技能、定时触发和 runtime 边界
+s11-s14  Workspace / SquadRouter / Project / AgentStore   协作边界、workdir 和 agent profile
+s15      DaemonWorker                                     常驻后台消费 queued task
+s16      ExecutionContextBuilder                          把 task 执行上下文写入 workdir
+s17      RuntimeSlotPool + SlotDaemonWorker               先有执行空位,再 claim task
 ```
 
 s99 把这些能力放在同一个 FastAPI 应用里:
@@ -35,14 +36,14 @@ API layer
 Stores
   保存 issues、tasks、projects、agents、skills、squads、sessions
 
-DaemonWorker
-  后台等待 wakeup 或 poll interval,自动调用 daemon.tick()
+RuntimeSlotPool + SlotDaemonWorker
+  后台等待 wakeup 或 poll interval,先 acquire slot,再 claim/execute task
 
 ExecutionContextBuilder
   按 task 解析 issue/project/agent/skills,写入 .mica/tasks/<task_id>/
 
 Console UI
-  提供可点击的 Project / Issue / Task / Agent / Skill / Daemon / Trace 页面
+  提供可点击的 Project / Issue / Task / Agent / Skill / Daemon / Runtime slots / Trace 页面
 ```
 
 ## 2. 一条完整操作路径
@@ -128,34 +129,37 @@ title / body
 ```text
 IssueStore.create(...)
 TaskStore.enqueue(issue.id, "agent", assignee_id)
-DaemonWorker.wakeup()
+SlotDaemonWorker.wakeup()
 ```
 
 如果 assignee 是 squad,请求会进入 `SquadRouter.assign_issue_to_squad(...)`,由 squad leader 获得 leader task。后续 leader 决定是否创建 child issue、派给哪个 worker、等待哪个 worker report。
 
 ### 2.5 让 Daemon 自动执行
 
-Daemon 页是 s15 的可视化入口:
+Daemon 页是 s15 + s17 的可视化入口:
 
 ```text
-Start daemon   启动后台 DaemonWorker
-Stop           停止后台 DaemonWorker
+Start daemon   启动后台 SlotDaemonWorker
+Stop           停止后台 SlotDaemonWorker
 Wakeup         手动唤醒 worker
 Run once       调试用,同步执行一轮 daemon.run_once()
-Status         查看 running / queued / claimed_count / poll_interval
+Status         查看 running / queued / claimed_count / completed_count / poll_interval
+Slots          查看 max_slots / available / occupied task
 ```
 
-后台模式下,任务入队后不需要再手动点 `Run once`。`DaemonWorker` 会被唤醒,随后反复调用:
+后台模式下,任务入队后不需要再手动点 `Run once`。`SlotDaemonWorker` 会被唤醒,随后执行 slot-before-claim:
 
 ```text
-daemon.tick()
-  -> task_store.claim_next(...)
+slot_pool.acquire()
+  -> 没有 slot:不 claim task,queued task 留在队列
+  -> 有 slot:daemon.claim_next(...)
   -> daemon.execute(task)
   -> runner.run(...)
+  -> finally slot_pool.release(slot_id)
   -> 写 task status、issue status、session events
 ```
 
-`Run once` 仍然有价值:它让测试和调试可以在没有后台线程的情况下同步 drain 当前队列。
+这就是 s17 接入 s99 后最重要的行为:没有本地执行容量时,控制台不会提前把 queued task claim 成 dispatched。`Run once` 仍然有价值:它让测试和调试可以在没有后台线程的情况下同步 drain 当前队列,但主路径是 `Start daemon` 后由 slot-aware worker 自动执行。
 
 ### 2.6 查看 Task Trace
 
@@ -225,7 +229,7 @@ POST   /api/daemon/wakeup
 POST   /api/daemon/run-once
 ```
 
-`start/stop/wakeup` 操作的是 `DaemonWorker`;`run-once` 操作的是底层 `Daemon`。这两个入口共用同一个 task queue。
+`start/stop/wakeup` 操作的是 `SlotDaemonWorker`;`run-once` 操作的是底层 `Daemon`。这两个入口共用同一个 task queue。`/api/daemon/status` 会同时返回 `slots` 汇总,方便页面展示 runtime 容量。
 
 ### Execution Context
 
@@ -253,6 +257,14 @@ GET    /api/skills/{name}
 
 这些 API 体现 s14 的模型:agent 保存 skill names,skill loader 从文件系统读取 skill 正文。
 
+### Runtime Slots
+
+```text
+GET    /api/runtime/slots
+```
+
+这个 API 直接返回 `RuntimeSlotPool` 的 `max_slots / available / occupied`,用于观察 s17 的 slot-before-claim 行为。
+
 ### Projects / Squads / Autopilots
 
 ```text
@@ -261,7 +273,7 @@ POST   /api/projects
 
 GET    /api/squads
 POST   /api/squads
-POST   /api/squads/{squad_id}/child-issues
+POST   /api/issues/{issue_id}/squad/children
 POST   /api/squads/{squad_id}/worker-report
 
 GET    /api/autopilots
@@ -269,9 +281,9 @@ POST   /api/autopilots
 POST   /api/autopilots/tick
 ```
 
-这些页面让 s08-s12 的概念可以在同一个系统里联动:project 决定 workdir,autopilot 定时创建 issue,squad 把 issue 转成 leader/worker 协作流程。
+这些页面让 s08-s13 的概念可以在同一个系统里联动:project 决定 workdir,autopilot 定时创建 issue,squad 把 issue 转成 leader/worker 协作流程。
 
-## 4. 三个关键边界
+## 4. 四个关键边界
 
 ### 4.1 Mission Control 不替代 Daemon
 
@@ -282,7 +294,8 @@ Console click
   -> API route
   -> store mutation
   -> wakeup daemon
-  -> daemon.tick()
+  -> SlotDaemonWorker acquire slot
+  -> daemon.claim_next() / daemon.execute(task)
 ```
 
 所以调试执行问题时,优先看 task status 和 events,而不是只看按钮有没有点成功。
@@ -313,17 +326,35 @@ queued task
 
 它的价值是让 runtime 启动前的输入可见、可审计、可测试。执行结果仍然由 daemon/runner 写回 task 和 session events。
 
+### 4.4 Runtime Slot 不等于 Task Queue
+
+queued task 表示“有活可领”,runtime slot 表示“本机现在有执行空位”。s99 现在使用 s17 的 `RuntimeSlotPool + SlotDaemonWorker`,所以后台主路径是:
+
+```text
+有 queued task + 有 available slot
+  -> claim task
+  -> occupied slot 绑定 task_id
+  -> execute 完成后 release slot
+
+有 queued task + 没有 available slot
+  -> 不 claim task
+  -> task 保持 queued
+```
+
+这个边界避免了“任务已经被 claim,但本机其实没有能力执行”的假运行状态。
+
 ## 5. 与 multiCa 的对应关系
 
 | 维度 | mica s99 | multiCa |
 |---|---|---|
 | 控制台 | FastAPI + 内联 vanilla JS | 更完整的 Web/CLI 操作面 |
-| 后台执行 | `DaemonWorker.start()` | daemon 常驻进程与 poll/wakeup loop |
-| task claim | `TaskStore.claim_next()` | server/daemon 协作 claim task |
+| 后台执行 | `SlotDaemonWorker.start()` | daemon 常驻进程与 poll/wakeup loop |
+| task claim | `slot_pool.acquire()` 后 `Daemon.claim_next()` | server/daemon 协作 claim task |
 | project workdir | `Project.local_path` | workspace/project checkout 或执行目录 |
 | agent 配置 | `AgentStore` + `Agent.skill_names` | agent profile 与 agent-skill 关系 |
 | skill 加载 | `SkillLoader` 读取 `skills/**/SKILL.md` | workspace/builtin/imported skill bundle |
 | context prepare | `.mica/tasks/<task_id>/...` | execenv/runtime 启动前准备上下文 |
+| runtime capacity | `RuntimeSlotPool` + `/api/runtime/slots` | runtime max concurrency / slot semaphore |
 | squad | `SquadRouter` leader-first 教学模型 | squad coordinator、leader/worker task 编排 |
 
 可以用一句话理解 s99:
@@ -354,7 +385,8 @@ python sessions/zh/s99_mission_control.py
 3. Daemon:点击 Start daemon
 4. Issues:创建 issue,选择 project 和 agent
 5. Tasks/Trace:查看 task 自动完成和事件流
-6. Task detail:点击 Prepare context,查看 agent-identity.md / task-context.md / manifest.json
+6. System:观察 runtime slots 的 available / occupied
+7. Task detail:点击 Prepare context,查看 agent-identity.md / task-context.md / manifest.json
 ```
 
-走完这条路径后,你看到的就不是一个静态观察页,而是 s01-s16 串起来后的最小可用 Mission Control。
+走完这条路径后,你看到的就不是一个静态观察页,而是 s01-s17 串起来后的最小可用 Mission Control。

@@ -5,6 +5,7 @@ leak between tests. Pattern mirrors tests/test_web_panel.py.
 """
 import datetime
 import os
+import threading
 import time
 from datetime import timedelta, timezone
 
@@ -25,9 +26,40 @@ from sessions.zh.s99_mission_control import (
     SquadRouter,
     StubRunner,
     TaskStore,
+    RuntimeSlotPool,
     browse_dirs,
     create_console_app,
 )
+
+
+class SlowRunner:
+    def __init__(self, delay=0.15):
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def run(self, task, issue, context, on_event, resume_session_id=None,
+            append_system_prompt=None, skill_body=None, cwd=None):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        on_event({"type": "progress", "task_id": task.id, "message": "slow start"})
+        time.sleep(self.delay)
+        on_event({"type": "done", "task_id": task.id, "output": "slow done"})
+        with self._lock:
+            self.active -= 1
+        return {"status": "done", "output": "slow done",
+                "exit_code": 0, "session_id": ""}
+
+
+def _wait_until(predicate, timeout=2.0, interval=0.01):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
 
 
 def _client(tmp_path):
@@ -418,6 +450,9 @@ def test_daemon_start_auto_executes_enqueued_task(tmp_path):
     client, is_, ts, *_ = _client(tmp_path)
     status = client.post("/api/daemon/start").json()
     assert status["running"] is True
+    assert status["slots"]["configured"] is True
+    assert status["slots"]["runtime_id"] == "rt-1"
+    assert status["slots"]["max_slots"] == 1
     try:
         res = client.post(
             "/api/issues",
@@ -435,6 +470,55 @@ def test_daemon_start_auto_executes_enqueued_task(tmp_path):
     finally:
         stopped = client.post("/api/daemon/stop").json()
         assert stopped["running"] is False
+
+
+def test_s99_slot_worker_does_not_claim_without_capacity(tmp_path):
+    is_ = IssueStore()
+    ts = TaskStore()
+    ss = SessionStore(str(tmp_path))
+    hub = RealtimeHub()
+    runtime = Runtime(id="rt-1", name="local", clis=["claude"])
+    slot_pool = RuntimeSlotPool(runtime.id, max_slots=1)
+    runner = SlowRunner(delay=0.25)
+    daemon = Daemon(is_, ts, runner, runtime_id=runtime.id, session_store=ss, hub=hub)
+    app = create_console_app(is_, ts, ss, hub, daemon=daemon,
+                             runtime=runtime, slot_pool=slot_pool)
+    client = TestClient(app)
+
+    client.post("/api/daemon/start")
+    try:
+        first = client.post(
+            "/api/issues",
+            params={"title": "first", "assignee_type": "agent", "assignee_id": "agent-1"},
+        ).json()
+        assert _wait_until(
+            lambda: ts.list(first["id"]) and ts.list(first["id"])[0].status.value == "running"
+        )
+
+        second = client.post(
+            "/api/issues",
+            params={"title": "second", "assignee_type": "agent", "assignee_id": "agent-1"},
+        ).json()
+        assert _wait_until(
+            lambda: len([t for t in ts.list() if t.status.value == "queued"]) == 1,
+            timeout=0.5,
+        )
+
+        status = client.get("/api/daemon/status").json()
+        slots = client.get("/api/runtime/slots").json()
+        assert status["slots"] == slots
+        assert slots["available"] == 0
+        assert len(slots["occupied"]) == 1
+        assert runner.max_active <= 1
+
+        assert _wait_until(
+            lambda: all(t.status.value == "completed" for t in ts.list()),
+            timeout=2.0,
+        )
+        assert is_.get(first["id"]).status == IssueStatus.IN_REVIEW
+        assert is_.get(second["id"]).status == IssueStatus.IN_REVIEW
+    finally:
+        client.post("/api/daemon/stop")
 
 
 def test_prepare_and_read_task_execution_context(tmp_path):
