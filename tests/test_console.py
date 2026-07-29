@@ -202,8 +202,9 @@ def test_get_console_html(tmp_path):
     client, *_ = _client(tmp_path)
     res = client.get("/")
     assert res.status_code == 200
-    assert "mica" in res.text.lower()
-    assert "mission control" in res.text.lower() or "console" in res.text.lower()
+    text = res.text.lower()
+    assert "mica" in text
+    assert "petite-vue" in text or "app.js" in text
 
 
 def test_project_create_and_list(tmp_path):
@@ -413,8 +414,6 @@ def test_fs_browse_route(tmp_path):
     assert isinstance(res2["dirs"], list)
 
 
-
-
 def test_daemon_start_auto_executes_enqueued_task(tmp_path):
     client, is_, ts, *_ = _client(tmp_path)
     status = client.post("/api/daemon/start").json()
@@ -471,10 +470,12 @@ def test_prepare_and_read_task_execution_context(tmp_path):
     assert "prepare me" in file_data["content"]
 
 
-def test_console_html_exposes_daemon_and_context_controls(tmp_path):
+def test_static_files_served(tmp_path):
+    """/app.js and /styles.css are served by StaticFiles."""
     client, *_ = _client(tmp_path)
-    html = client.get("/").text
-    assert "data-v=\"daemon\"" in html
-    assert "startDaemon" in html
-    assert "prepareContext" in html
-    assert "Execution Context" in html
+    assert client.get("/app.js").status_code == 200
+    assert client.get("/styles.css").status_code == 200
+    queue_js = client.get("/components/queue.js")
+    assert queue_js.status_code == 200
+    assert "Execution Context" in queue_js.text
+    assert "context/prepare" in queue_js.text
