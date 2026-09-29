@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Mica · Agent 工作台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <!-- MICA / AGENT CONSOLE -->
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#board" aria-label="Mica 首页">
+        <span class="brand-mark">M</span>
+        <span><strong>Mica</strong><small>Agent Control Plane</small></span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="#board" data-route="board"><span class="nav-icon">▦</span>任务看板</a>
+        <a href="#agents" data-route="agents"><span class="nav-icon">⌁</span>Agents</a>
+        <a href="#squads" data-route="squads"><span class="nav-icon">◇</span>Squads</a>
+        <a href="#runtimes" data-route="runtimes"><span class="nav-icon">◫</span>运行环境</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="health-line"><span class="health-dot" id="health-dot"></span><span id="health-label">正在检查服务</span></div>
+        <small>Web 与飞书共享任务入口</small>
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow" id="page-eyebrow">MISSION CONTROL</p><h1 id="page-title">任务看板</h1></div>
+        <div class="topbar-actions">
+          <button class="icon-button" id="refresh-button" title="刷新当前页面" aria-label="刷新">↻</button>
+          <button class="primary-button" id="primary-action">＋ 新建任务</button>
+        </div>
+      </header>
+      <div class="page" id="page"><div class="loading-state"><span class="spinner"></span>正在加载工作台…</div></div>
+    </main>
+  </div>
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true"><div id="drawer-content"></div></aside>
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div id="modal-content"></div></section>
+  </div>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script type="module" src="/assets/app.js?v=claude-permission-protocol"></script>
+</body>
+</html>
