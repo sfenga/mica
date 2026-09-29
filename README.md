@@ -1,34 +1,10 @@
 # mica
 
-渐进式教学仓库,做一个最小可用的 multiCa —— 把 coding agent 变成数字队友:
-issue 板 → 派给 agent → 本地 daemon 认领 → spawn 真实 CLI(`claude`)执行 → 实时回传 → 落盘 → 上看板。
+Mica 是面向企业内部场景的多智能体任务协作平台：用户可以从 Web 等入口提交事项，将任务指派给本地 Coding Agent、远程业务 Agent 或 Agent Squad，并持续查看执行过程与结果。
 
-每章一个可直接运行的 Python 文件 + 同名 `.md`,每章只引入一个新概念。s01-s14 基本保留“前置代码原样快照”的教学风格;s15-s17 进入执行层扩展,会复用前章对象来讲后台 worker、execution context 和 runtime slot。这个仓库不是生产系统,而是一个按章节展开的本地学习项目:用最小代码讲清楚 issue、task、daemon、runtime、workspace、skills、squads、workdir 和控制台如何连接起来。
+`mica/` 是可独立安装的正式后端包，包含领域服务、PostgreSQL 仓储、API、Runtime Daemon、Agent Provider、实时事件与渠道集成。`sessions/zh/` 仅保留历史原型，不参与正式包构建和运行。
 
-> 定位:mica 默认只面向本机使用。所有 Web/WS demo 都应监听 `127.0.0.1`,不要暴露到局域网或公网。
-
-## 章节索引
-
-| 章 | 主题 |
-|---|---|
-| s01 | Issue 模型 + 看板 + 7 态状态机 + 多态 assignee |
-| s02 | Task 实体 + Daemon 认领 task + StubRunner |
-| s03 | `claude` CLI runner,真实模型接入 |
-| s04 | JSONL 持久化(issues+tasks+sessions)+ 重放 + orphan |
-| s05 | 评论建新 task + `--resume` 上一 task |
-| s06 | WebSocket 实时进度 |
-| s07 | FastAPI 单页看板 + 创建/转移/评论 |
-| s08 | markdown skill 文件加载(`SkillLoader` + `SKILL.md`) |
-| s09 | cron autopilot |
-| s10 | 多 CLI + PATH 探测(1 daemon : N agent) |
-| s11 | 多 workspace 隔离 + 成员资格 |
-| s12 | Squads:leader-first 多 agent 协调 |
-| s13 | Project + workdir:让 agent 在正确代码目录执行 |
-| s14 | Agent Profile:system_prompt + skill 绑定 + daemon 注入 |
-| s15 | Daemon Loop:后台 worker + task wakeup 自动执行 |
-| s16 | Execution Context:把 agent/issue/skill 物化到 workdir |
-| s17 | Runtime Capacity / Slot:先有执行空位,再 claim task |
-| s99 | Mission Control:最终集成控制台,用于操作、执行和观察全系统 |
+> 当前版本面向可信本机环境，API 默认监听 `127.0.0.1`。接入企业 SSO 和 Workspace 权限校验前，不应暴露到局域网或公网。
 
 ## 快速开始
 
@@ -37,47 +13,139 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 
-# 跑某章
-python sessions/zh/s01_issue_board.py
-python sessions/zh/s02_task_daemon.py
-python sessions/zh/s13_project_workdir.py
-python sessions/zh/s14_agents.py
+# 启动 PostgreSQL；应用启动时自动执行版本化迁移
+docker compose up -d postgres
 
-# 打开最终集成控制台
-python sessions/zh/s99_mission_control.py
-# 浏览器访问 http://localhost:8000/
+# 分别启动 API 和本地 Runtime Daemon
+python -m mica.main
+python -m mica.daemon_main
+
+# Web 控制台
+# 浏览器访问 http://127.0.0.1:8000/app
+# 就绪检查（同时验证数据库、Runtime 与 Provider 配置）
+curl http://127.0.0.1:8000/health/ready
+
+# 扫描并注册本机 Git 项目（Web 控制台会在首次选择时自动完成这一步）
+curl http://127.0.0.1:8000/api/project-candidates
+curl -X POST http://127.0.0.1:8000/api/projects \
+  -H 'content-type: application/json' \
+  -d '{"name":"orders-service","local_path":"/absolute/path/to/repository","workspace_id":"local","runtime_id":"local"}'
+
+# 创建代码事项时引用 project_id，不再逐次传递本机路径
+curl -X POST http://127.0.0.1:8000/api/issues \
+  -H 'content-type: application/json' \
+  -d '{"title":"修复订单导出异常","body":"定位并修复批量导出中断","workspace_id":"local","project_id":"project_xxx"}'
 
 # 测试
 python -m pytest -q
 ```
 
-> s03 起如果使用真实 `ClaudeCliRunner`,需本机已安装并登录 `claude`(Claude Code)。大多数测试和 demo 默认使用 `StubRunner`,不依赖真实 CLI。
+正式 Daemon 默认使用 Codex，也可以通过 `MICA_DEFAULT_PROVIDER=claude` 切换到 Claude Code；对应 CLI 需要已安装并登录。自动化测试使用 Stub 或伪 CLI，不会调用真实模型。
 
-`s99_mission_control.py` 会读取 `.env` 中的 `MULTICA_DATA_DIR`、`MULTICA_WEB_PORT`、`MULTICA_POLL_INTERVAL`、`MULTICA_MAX_SLOTS`、`MULTICA_DEFAULT_CLI` 和 `MULTICA_AGENT_ID`。早期章节保持单文件教学风格,主要通过代码里的默认值演示概念。
+### Web 与飞书入口
 
-## 推荐学习路线
+正式 Web 控制台位于 `http://127.0.0.1:8000/app`。Web 与飞书消息都会进入同一个 `IngressService`：外部事件先按渠道、租户和事件 ID 去重，再完成用户身份映射，并在同一事务中创建 Issue、首个 Task 与回复 Outbox。Web 可通过 `Idempotency-Key` 防止重复提交；任务详情支持追问某条执行记录对应的 Agent，也可使用 `@agent:ID` 或 `@squad:ID` 显式路由。
 
-1. 先读 s01-s02,理解 issue 与 task 为什么分层。
-2. 再读 s03-s05,理解真实 CLI、session_id 和评论续跑。
-3. 继续读 s06-s07,观察执行事件如何进入实时通道和 Web 看板。
-4. 读 s08-s10,学习 skills、autopilot、多 CLI 与 runtime 边界。
-5. 读 s11-s14,把系统扩展到 workspace、squad、project workdir 和 agent profile。
-6. 读 s15-s17,理解后台 daemon loop、runtime 可见的 execution context 和执行容量。
-7. 最后运行 s99,用 Mission Control 创建 issue、启动 daemon、查看 trace、context 文件和 runtime slot 状态。
+飞书开放平台需要订阅 `im.message.receive_v1`，回调地址设为 `POST /api/integrations/feishu/events`。配置 `.env.example` 中的四个 `FEISHU_*` 必填项后启用该端点；官方 SDK 负责验签与解密，应用凭证不会写入数据库。设置 `FEISHU_WORKSPACE_ID=local` 后，飞书与本地 Web 可以使用同一批 Agent/Squad。文本消息默认交给 `FEISHU_DEFAULT_AGENT_ID`，也可显式选择 Agent：
+
+```text
+mica agent=geometry-agent 根据这些参数生成布局方案
+```
+
+平台先回复受理结果；Agent 完成、失败、取消或需要补充信息后，再由持久化 Outbox 异步回传原飞书会话。投递采用指数退避，超过 `MICA_CHANNEL_MAX_ATTEMPTS` 后进入 `failed` 状态，避免失效渠道造成无限重试。当前 Web 身份来自本机请求头，尚未接入企业 SSO，因此仍只应监听 `127.0.0.1`。
+
+同一 Issue/Agent 在尚未执行时收到的连续补充会合并到一个待执行 Task；已有 Task 正在运行时，后续消息只汇入一个 successor Task。Daemon 领取时固化本轮输入快照，从而减少重复启动，同时保证执行中的上下文不会被后来消息改写。
+
+### Agent Squad
+
+用户可以在 Web 控制台组装 Squad，选择 Leader、成员和 Leader 协作规则。Squad 是协调对象而不是执行进程：Issue 指派给 Squad 后只先运行 Leader，Leader 根据 roster 中的角色和能力返回结构化委派决策，平台校验成员身份后再创建成员 Task；同一批成员 Task 全部结束后，平台只唤醒一次 Leader 汇总，最终由 Leader 将 Issue 推进到人工确认。成员等待输入、失败或取消时同样把结果交回 Leader；执行期间到达的用户追问会排在当前成员批次之后处理，不会被去重逻辑吞掉。
+
+也可以通过 API 配置更细的成员角色和能力：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/squads \
+  -H 'content-type: application/json' \
+  -d '{
+    "name":"Layout Squad",
+    "workspace_id":"local",
+    "leader_agent_id":"consultant-agent",
+    "instructions":"先校验几何约束，再生成摆放方案",
+    "members":[
+      {"agent_id":"geometry-agent","role":"约束校验","capabilities":["geometry"]},
+      {"agent_id":"placement-agent","role":"方案生成","capabilities":["placement"]}
+    ]
+  }'
+```
+
+Web 创建任务时可直接选择该 Squad；飞书文本使用下面的形式指定：
+
+```text
+mica squad=<squad-id> 根据会议室尺寸生成合规布局
+```
+
+### ACP 本地 Agent
+
+ACP Agent 仍绑定本机 Runtime，并按项目配置在当前目录或独立 Git Worktree 中运行；未关联项目时使用 Daemon 管理的空工作目录。创建 Agent 时配置 ACP bridge 命令；权限默认拒绝，只有可信测试环境才显式开启 `allow`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/agents \
+  -H 'content-type: application/json' \
+  -d '{
+    "id":"codex-acp",
+    "name":"Codex ACP",
+    "runtime_id":"local",
+    "provider":"acp",
+    "provider_config":{
+      "command":["npx","-y","@agentclientprotocol/codex-acp"],
+      "permission_policy":"allow"
+    }
+  }'
+```
+
+### A2A 远程业务 Agent
+
+A2A Agent 通过 Agent Card 发现远端 HTTP+JSON 1.0 接口。访问令牌不写入数据库，只保存环境变量名；`output_schema` 用于校验 Geometry、Placement 等业务 Agent 的 JSON 结果：
+
+```bash
+export GEOMETRY_AGENT_TOKEN='replace-me'
+
+curl -X POST http://127.0.0.1:8000/api/agents \
+  -H 'content-type: application/json' \
+  -d '{
+    "id":"geometry-agent",
+    "name":"Geometry Agent",
+    "runtime_id":"local",
+    "provider":"a2a",
+    "instructions":"根据用户参数生成满足约束的空间方案",
+    "provider_config":{
+      "agent_card_url":"https://geometry.internal.example/.well-known/agent-card.json",
+      "token_env":"GEOMETRY_AGENT_TOKEN",
+      "skill_id":"layout",
+      "output_schema":{
+        "type":"object",
+        "required":["layoutId","valid"],
+        "properties":{
+          "layoutId":{"type":"string"},
+          "valid":{"type":"boolean"}
+        }
+      }
+    }
+  }'
+```
+
+阶段 2–6 的真实环境验收清单见 [`docs/test-plan.md`](docs/test-plan.md)。
 
 ## 安全说明
 
-- 本项目是本地教学项目,不要把控制台对局域网或公网暴露。
-- 各章 Web/WS demo 默认应绑定 `127.0.0.1`;如果你手动改成 `0.0.0.0`,等同于把本机控制台暴露给其他机器。
-- `s99_mission_control.py` 的目录浏览 API(`/api/fs/browse`)用于本机选择 project workdir。它会暴露本机目录结构,仅适合可信本机浏览器访问。
-- `ClaudeCliRunner` 为了教学自动化默认使用 `--permission-mode bypassPermissions`;这会让 Claude Code 自动批准工具调用。只在可信代码目录和你自己创建的可信任务上运行真实 CLI。
+- 当前阶段默认单机运行,不要把尚未接入身份认证的控制台暴露到局域网或公网。
 - `workspace/` 是运行时数据目录,默认已被 `.gitignore` 忽略。
 
 ## 仓库结构
 
 ```text
-sessions/zh/   每章教学代码与中文文档
-tests/         行为测试,覆盖核心教学契约
-docs/wiki/     可同步到 wiki 的长文学习文档
+mica/          正式后端包：领域模型、应用服务、仓储接口、Daemon 与 Agent Provider
+sessions/zh/   历史原型，不参与正式包构建
+tests/         行为与契约测试
+docs/wiki/     可同步到 Wiki 的设计与实现文档
 openspec/      早期规格与设计记录
 ```
