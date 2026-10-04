@@ -42,5 +42,10 @@ jobs:
         run: |
           ruff check mica
           ruff format --check mica
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Frontend logic tests
+        run: node --test tests/web*.test.mjs
       - name: Test
         run: python -m pytest -q

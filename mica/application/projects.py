@@ -62,7 +62,9 @@ class ProjectService:
             raise ValueError(f"project directory is not a Git repository: {path}")
         existing = self.projects.find_by_path(workspace_id, runtime_id, str(path))
         if existing is not None:
-            if existing.execution_mode != execution_mode or existing.name != (name.strip() or path.name):
+            if existing.execution_mode != execution_mode or existing.name != (
+                name.strip() or path.name
+            ):
                 return self.projects.save(
                     replace(
                         existing,
@@ -99,7 +101,9 @@ class ProjectService:
 
     def _roots(self) -> list[Path]:
         configured = self.environ.get("MICA_PROJECT_ROOTS", "").strip()
-        values = configured.split(os.pathsep) if configured else [str(self.working_directory.parent)]
+        values = (
+            configured.split(os.pathsep) if configured else [str(self.working_directory.parent)]
+        )
         return [Path(value).expanduser().resolve() for value in values if value.strip()]
 
     def _within_roots(self, path: Path) -> bool:
@@ -129,5 +133,9 @@ class ProjectService:
             except OSError:
                 continue
             for grandchild in grandchildren:
-                if not grandchild.name.startswith(".") and grandchild.is_dir() and not grandchild.is_symlink():
+                if (
+                    not grandchild.name.startswith(".")
+                    and grandchild.is_dir()
+                    and not grandchild.is_symlink()
+                ):
                     yield grandchild

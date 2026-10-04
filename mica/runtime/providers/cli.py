@@ -27,15 +27,18 @@ CLAUDE_INTERNAL_SYSTEM_EVENTS = {
 
 
 def _claude_input_frame(prompt: str) -> str:
-    return json.dumps(
-        {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            },
-        }
-    ) + "\n"
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                },
+            }
+        )
+        + "\n"
+    )
 
 
 def _claude_control_response(line: str) -> Optional[str]:
@@ -56,16 +59,19 @@ def _claude_control_response(line: str) -> Optional[str]:
         tool_input = dict(tool_input)
     if tool_input.get("run_in_background") is True:
         tool_input["run_in_background"] = False
-    return json.dumps(
-        {
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": payload["request_id"],
-                "response": {"behavior": "allow", "updatedInput": tool_input},
-            },
-        }
-    ) + "\n"
+    return (
+        json.dumps(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": payload["request_id"],
+                    "response": {"behavior": "allow", "updatedInput": tool_input},
+                },
+            }
+        )
+        + "\n"
+    )
 
 
 def _claude_event_type(line: str) -> Optional[str]:
