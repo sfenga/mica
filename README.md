@@ -147,5 +147,6 @@ mica/          正式后端包：领域模型、应用服务、仓储接口、Da
 sessions/zh/   历史原型，不参与正式包构建
 tests/         行为与契约测试
 docs/wiki/     可同步到 Wiki 的设计与实现文档
+docs/foundations/ 基础组件说明（PostgreSQL 核心用法等）
 openspec/      早期规格与设计记录
 ```

@@ -240,15 +240,33 @@ Agent 评论 C2：发现同步游标更新时机不正确
     ↓ 路由回 C2 对应的 Codex，创建后续 Task
 ```
 
-`TriggerService._comment_targets()` 使用以下优先级：
+`TriggerService._comment_targets()`（`mica/application/services.py`）决定本条评论触发谁。先说明三个前提：
 
-1. 评论中的 `@agent:ID`、`@squad:ID` 或 `mention://...`。
-2. 直接回复 Agent 评论时，根据父评论的 `source_task_id` 找到当时执行的 Agent，并保留其 Squad Leader/Member 角色。
-3. 回复用户发起的既有线程时，沿 `parent_comment_id` 找到线程根评论；如果根评论曾触发 Agent，则继续交给该对话 Agent。
-4. 回复纯人工讨论线程时，不自动启动 Agent。
-5. 新建顶级评论且没有明确提及时，交给 Issue 默认 Agent；若 Issue 指派给 Squad，则交给 Squad Leader。
+- **事务边界**：评论落库与目标任务创建在同一事务内。路由过程中抛错（例如 @ 了不存在的 Agent）会整体回滚，评论不会留下（见第 7 节与 known-issues KI-006）。
+- **状态门禁**：Issue 处于 backlog / done / cancelled 时只保存评论，完全不进入路由；todo / in_progress / in_review / blocked 正常路由。
+- **Agent 评论不参与路由**：Agent 的结果评论由 `_append_agent_comment()` 直接写入，不经过 `add_comment()`，因此 Agent 的发言永远不会再触发其他 Agent，结构上杜绝互相触发死循环；Squad 成员到 Leader 的回流由批次屏障负责，不走评论路由。
+
+决策树按优先级分为四级，命中即停（第一级可产生多个目标）：
+
+1. **显式提及**：识别 `mention://agent|squad/ID` 与 `@agent:ID` / `@squad:ID` 两种写法。`@agent` 以该 Agent 为目标；`@squad` 以该 Squad 的 Leader 为目标，并带 `squad_id`、`is_leader_task=True`。一条评论可提及多个对象，每个对象产生一个目标；回复中只要带提及，就以提及为准，不再追溯回复关系。
+2. **回复追溯**（无提及且 `parent_comment_id` 非空），按精确度分三个子规则：
+   - **2a. 父评论带 `source_task_id`**（它是某次 Task 的产出）：路由给执行该 Task 的 Agent，并继承其 `squad_id` / `is_leader_task`——回复成员的结果回到成员，回复 Leader 的汇总回到 Leader（以 Leader 身份）。
+   - **2b. 父评论 `author_type='agent'` 但无任务关联**：按作者身份路由。当前写入路径不会产生这种评论（唯一写 Agent 评论的 `_append_agent_comment()` 必带 `source_task_id`）；它是为 `source_task_id` 外键的 `ON DELETE SET NULL` 预留的降级——任务行先于评论消失时（例如未来引入任务保留期清理），路由从“精确的任务角色”降级为“作者身份”（squad 角色随之丢失），而不是直接掉入最模糊的爬根。
+   - **2c. 父评论是人写的**：沿 `parent_comment_id` 一路爬到线程根（visited 集合防环，中途不停），再在该 Issue 的全部 Task 中找根评论的匹配者（`trigger_comment_id == 根.id` 或根 id 属于 `merged_comment_ids`）。命中则路由给该 Task 的 Agent（继承 squad 上下文）；**未命中则不触发任何 Agent**——纯人工讨论线不产生任务。
+3. **默认负责人兜底**：以上都未命中时，Issue 负责人是 Agent 则交给该 Agent；是 Squad 则交给其 Leader。没有提及的根评论必然落到这里。
+4. **去重**：同一 Agent 被多次命中只保留一个目标；同一 Agent 同时以普通身份和 Leader 身份出现时，Leader 身份优先。
 
 显式提及优先级最高，因此用户既可以回复原 Agent 延续上下文，也可以在回复中 `@` 另一个 Agent 做独立审核。多个提及会生成多个目标，同一 Agent 被重复提及时按 Agent ID 去重。
+
+人与人在评论区的讨论是否触发 Agent，可以归纳为：
+
+| 场景 | 路由结果 |
+|---|---|
+| 活跃 Issue 上新建根评论 | 触发默认负责人（第 3 级） |
+| 回复人评论，该线根评论触发过 Task | 触发该 Task 的 Agent（2c 命中） |
+| 回复人评论，根未触发过 Task（如 backlog 期的讨论） | 不触发任何 Agent（2c 落空） |
+| 回复 Agent 的结果评论 | 触发产出它的 Agent（2a） |
+| backlog / done / cancelled 上的任何评论 | 不触发（状态门禁，评论照存） |
 
 这里需要区分三类 ID：
 
@@ -331,6 +349,8 @@ Agent 的 Prompt、会话状态和工具调用在启动后已经确定。修改 
 - 路由语法目前是显式 ID，不包含自然语言实体识别。
 - 多个目标是分别创建 Task，不存在跨 Agent 的全局消息合并。
 - `delivered_comment_ids` 固化输入，但暂未保存最终 Prompt 的完整哈希或版本。
+- @mention 目标不存在时整条评论创建失败（路由与落库同事务），见 `docs/known-issues.md` KI-006。
+- 回复追溯的线程归属只认根评论的触发记录；中途被 @ 拉进线程的 Agent 不接管整线，见 `docs/known-issues.md` KI-007。
 
 ## 8. 面试时的 90 秒讲法
 
