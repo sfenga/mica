@@ -18,6 +18,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -498,7 +499,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
         delivered = set()
         try:
             for event in state.events.list(task_id):
-                await websocket.send_json(_document(event))
+                await websocket.send_json(jsonable_encoder(_document(event)))
                 delivered.add(event.id)
             while True:
                 try:
@@ -506,7 +507,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
                     if event.id in delivered:
                         continue
                     delivered.add(event.id)
-                    await websocket.send_json(_document(event))
+                    await websocket.send_json(jsonable_encoder(_document(event)))
                 except Empty:
                     await websocket.send_json({"event_type": "heartbeat", "task_id": task_id})
         except WebSocketDisconnect:

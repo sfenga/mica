@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -291,10 +292,26 @@ class Daemon:
             self.squads.handle_worker_terminal(task)
 
     def _heartbeat(self, task_id: str, stop: Event, lease_lost: Event) -> None:
+        # The lease stays valid for lease_seconds past the last successful
+        # renewal. A renewal error leaves ownership unknown, so keep retrying
+        # until that window closes; a False return means the task was already
+        # reclaimed, which is definitive.
+        deadline = time.monotonic() + self.lease_seconds
         while not stop.wait(self.heartbeat_seconds):
-            if not self.tasks.renew_lease(task_id, self.worker_id, self.lease_seconds):
+            try:
+                renewed = self.tasks.renew_lease(task_id, self.worker_id, self.lease_seconds)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "lease renewal failed",
+                    extra={"task_id": task_id, "worker_id": self.worker_id},
+                )
+                if time.monotonic() < deadline:
+                    continue
+                renewed = False
+            if not renewed:
                 lease_lost.set()
                 return
+            deadline = time.monotonic() + self.lease_seconds
 
 
 class DaemonWorker:

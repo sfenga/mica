@@ -242,3 +242,40 @@ def test_squad_configuration_can_be_updated_when_idle():
             f"/api/squads/{squad['id']}/members/local-assistant"
         )
         assert removed.status_code == 204
+
+
+def test_websocket_serializes_history_and_live_event_dates(monkeypatch):
+    from fastapi import WebSocketDisconnect
+
+    from mica.domain import TaskEvent
+
+    monkeypatch.setenv("MICA_EMBEDDED_DAEMON", "0")
+    container = build_memory_container()
+    issue = container.trigger_service.create_issue(
+        title="Live dates",
+        body="Verify JSON websocket frames.",
+        workspace_id="local",
+        assignee_id="local-assistant",
+    )
+    task = container.tasks.list(issue.id)[0]
+    live = TaskEvent(task_id=task.id, event_type="agent.text", payload={"text": "live"})
+
+    class Channel:
+        delivered = False
+
+        def get(self, *_args):
+            if self.delivered:
+                raise WebSocketDisconnect()
+            self.delivered = True
+            return live
+
+    monkeypatch.setattr(container.event_bus, "subscribe", lambda _task_id: Channel())
+    monkeypatch.setattr(container.event_bus, "unsubscribe", lambda *_args: None)
+    with TestClient(create_app(container)) as client:
+        with client.websocket_connect(f"/api/tasks/{task.id}/events") as socket:
+            history = socket.receive_json()
+            message = socket.receive_json()
+            assert history["event_type"] == "task.queued"
+            assert isinstance(history["created_at"], str)
+            assert message["event_type"] == "agent.text"
+            assert isinstance(message["created_at"], str)

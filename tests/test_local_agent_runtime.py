@@ -64,6 +64,12 @@ class ConcurrencyProvider:
         return ProviderRunResult(output="done", session_id=f"session-{task.id}")
 
 
+class SlowProvider:
+    def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
+        time.sleep(0.3)
+        return ProviderRunResult(output="done", session_id=f"session-{task.id}")
+
+
 def create_git_repository(path: str) -> None:
     subprocess.run(["git", "init", "-q", path], check=True)
     subprocess.run(["git", "-C", path, "config", "user.email", "mica@example.test"], check=True)
@@ -396,6 +402,66 @@ class LocalAgentRuntimeTest(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(TaskStatus.CANCELLED, container.task_service.get(task.id).status)
         self.assertEqual(IssueStatus.CANCELLED, container.issue_service.get(issue.id).status)
+
+    def test_heartbeat_renewal_errors_stop_execution_at_lease_deadline(self):
+        container = build_memory_container()
+        provider = BlockingProvider()
+        container.providers.register("blocking", provider)
+        container.agents.add(
+            Agent(id="local-assistant", name="Local", runtime_id="local", provider="blocking")
+        )
+        container.daemon.lease_seconds = 1
+        container.daemon.heartbeat_seconds = 0.05
+
+        def always_raise(task_id, worker_id, lease_seconds=120):
+            raise RuntimeError("database unavailable")
+
+        container.task_service.renew_lease = always_raise
+        issue = container.trigger_service.create_issue(
+            title="heartbeat", body="heartbeat", workspace_id="demo", assignee_id="local-assistant"
+        )
+        task = container.tasks.list(issue.id)[0]
+        worker = threading.Thread(target=container.daemon.run_once)
+        worker.start()
+        self.assertTrue(provider.started.wait(timeout=2))
+        with self.assertLogs("mica.runtime.daemon", level="ERROR"):
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        events = [event.event_type for event in container.events.list(task.id)]
+        self.assertIn("task.interrupted", events)
+        self.assertNotIn("task.completed", events)
+        self.assertEqual(TaskStatus.RUNNING, container.task_service.get(task.id).status)
+
+    def test_transient_renewal_error_does_not_interrupt_execution(self):
+        container = build_memory_container()
+        container.providers.register("slow", SlowProvider())
+        container.agents.add(
+            Agent(id="local-assistant", name="Local", runtime_id="local", provider="slow")
+        )
+        container.daemon.lease_seconds = 2
+        container.daemon.heartbeat_seconds = 0.05
+        original = container.task_service.renew_lease
+        calls = {"count": 0}
+
+        def flaky(task_id, worker_id, lease_seconds=120):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("database blip")
+            return original(task_id, worker_id, lease_seconds)
+
+        container.task_service.renew_lease = flaky
+        issue = container.trigger_service.create_issue(
+            title="transient", body="transient", workspace_id="demo", assignee_id="local-assistant"
+        )
+
+        self.assertTrue(container.daemon.run_once())
+
+        task = container.tasks.list(issue.id)[0]
+        self.assertEqual(TaskStatus.COMPLETED, task.status)
+        self.assertGreaterEqual(calls["count"], 2)
+        events = [event.event_type for event in container.events.list(task.id)]
+        self.assertNotIn("task.interrupted", events)
 
     def test_worker_uses_all_configured_runtime_slots(self):
         container = build_memory_container()
