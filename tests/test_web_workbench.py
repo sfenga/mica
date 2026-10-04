@@ -15,7 +15,7 @@ def test_workbench_assets_are_served():
         assert client.get("/assets/styles.css").status_code == 200
         script = client.get("/assets/app.js")
         assert script.status_code == 200
-        assert "ISSUE_COLUMNS" in script.text
+        assert "./lib/board.js" in script.text
 
 
 def test_runtime_can_be_edited_and_capabilities_are_exposed():
@@ -113,9 +113,7 @@ def test_claude_permission_mode_is_owned_by_runtime_adapter():
     assert response.json()["provider_config"] == {"executable": "/opt/bin/claude"}
 
 
-def test_discovered_project_can_be_selected_without_typing_path(
-    tmp_path: Path, monkeypatch
-):
+def test_discovered_project_can_be_selected_without_typing_path(tmp_path: Path, monkeypatch):
     repository = tmp_path / "orders-service"
     (repository / ".git").mkdir(parents=True)
     monkeypatch.setenv("MICA_PROJECT_ROOTS", str(tmp_path))
@@ -123,9 +121,7 @@ def test_discovered_project_can_be_selected_without_typing_path(
 
     with TestClient(create_app(container)) as client:
         candidates = client.get("/api/project-candidates").json()
-        assert candidates == [
-            {"name": "orders-service", "local_path": str(repository)}
-        ]
+        assert candidates == [{"name": "orders-service", "local_path": str(repository)}]
 
         project = client.post(
             "/api/projects",
@@ -160,9 +156,10 @@ def test_discovered_project_can_be_selected_without_typing_path(
         assert updated.status_code == 200
         assert updated.json()["execution_mode"] == "worktree"
         # The issue records how it was created; later project changes do not rewrite history.
-        assert client.get(f"/api/issues/{issue.json()['id']}").json()[
-            "project_execution_mode"
-        ] == "in_place"
+        assert (
+            client.get(f"/api/issues/{issue.json()['id']}").json()["project_execution_mode"]
+            == "in_place"
+        )
 
 
 def test_local_issue_can_run_without_selecting_a_project():
@@ -232,16 +229,41 @@ def test_squad_configuration_can_be_updated_when_idle():
         )
         assert updated.status_code == 200
         assert updated.json()["leader_agent_id"] == "remote-consultant"
-        assert next(
-            member
-            for member in updated.json()["members"]
-            if member["agent_id"] == "remote-consultant"
-        )["role"] == "leader"
-
-        removed = client.delete(
-            f"/api/squads/{squad['id']}/members/local-assistant"
+        assert (
+            next(
+                member
+                for member in updated.json()["members"]
+                if member["agent_id"] == "remote-consultant"
+            )["role"]
+            == "leader"
         )
+
+        removed = client.delete(f"/api/squads/{squad['id']}/members/local-assistant")
         assert removed.status_code == 204
+
+
+def test_nested_frontend_modules_are_served():
+    with TestClient(create_app(build_memory_container())) as client:
+        for asset in [
+            "detail.css",
+            "board.css",
+            "workbench.css",
+            "theme.css",
+            "theme.js",
+            "lib/comments.js",
+            "lib/api.js",
+            "lib/state.js",
+            "lib/ui.js",
+            "lib/board.js",
+            "lib/registry.js",
+            "lib/forms.js",
+            "lib/markdown.js",
+            "lib/composer.js",
+            "lib/issue-detail.js",
+            "lib/executions.js",
+        ]:
+            response = client.get(f"/assets/{asset}")
+            assert response.status_code == 200, asset
 
 
 def test_websocket_serializes_history_and_live_event_dates(monkeypatch):

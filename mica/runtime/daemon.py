@@ -190,16 +190,16 @@ class Daemon:
                 daemon=True,
             )
             heartbeat_thread.start()
+
             def cancellation_check() -> bool:
                 return (
                     self._shutdown.is_set()
                     or lease_lost.is_set()
                     or self.tasks.is_cancel_requested(task.id)
                 )
+
             if in_place_path is not None:
-                directory_lock = self.directory_locks.acquire(
-                    in_place_path, cancellation_check
-                )
+                directory_lock = self.directory_locks.acquire(in_place_path, cancellation_check)
             provider = self.providers.get(agent.provider)
             run_agent = agent
             if task.is_leader_task:
@@ -214,7 +214,7 @@ class Daemon:
                 run_agent,
                 issue,
                 task,
-                lambda event_type, payload: self.tasks.record(task.id, event_type, payload),
+                lambda event_type, payload: self._record_event(task.id, event_type, payload),
                 workdir=workdir,
                 resume_session_id=prior_session_id,
                 is_cancelled=cancellation_check,
@@ -251,10 +251,15 @@ class Daemon:
                 if self.tasks.is_cancel_requested(task.id):
                     try:
                         self._cancel_task(task)
-                    except InvalidStateError:
+                    except (InvalidStateError, NotFoundError):
                         pass
                 else:
                     self.tasks.record(task.id, "task.interrupted", {"worker_id": self.worker_id})
+            return True
+        except NotFoundError:
+            if task is None or self.tasks.tasks.get(task.id) is not None:
+                raise
+            # Deletion raced with setup, a provider event, or its final callback.
             return True
         except Exception as exc:
             logging.getLogger(__name__).exception(
@@ -262,14 +267,17 @@ class Daemon:
                 extra={"task_id": getattr(task, "id", None), "worker_id": self.worker_id},
             )
             if task is not None:
-                current = self.tasks.get(task.id)
-                if current.status in {TaskStatus.DISPATCHED, TaskStatus.RUNNING}:
+                current = self.tasks.tasks.get(task.id)
+                if current is not None and current.status in {
+                    TaskStatus.DISPATCHED,
+                    TaskStatus.RUNNING,
+                }:
                     try:
                         if task.squad_id and self.squads is not None:
                             self.squads.fail_task(task, str(exc), self.worker_id, task.attempt)
                         else:
                             self.tasks.fail(task.id, str(exc), self.worker_id, task.attempt)
-                    except InvalidStateError:
+                    except (InvalidStateError, NotFoundError):
                         pass
             return True
         finally:
@@ -279,6 +287,14 @@ class Daemon:
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=1)
             self.slots.release(self.runtime_id)
+
+    def _record_event(self, task_id, event_type, payload):
+        try:
+            return self.tasks.record(task_id, event_type, payload)
+        except NotFoundError:
+            if self.tasks.tasks.get(task_id) is not None:
+                raise
+            raise ProviderCancelled("task deleted") from None
 
     def _cancel_task(self, task) -> None:
         worker_role = bool(task.squad_id and not task.is_leader_task)

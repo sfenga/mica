@@ -1,48 +1,144 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Mica · Agent 工作台</title>
-  <link rel="stylesheet" href="/assets/styles.css">
-</head>
-<body>
-  <!-- MICA / AGENT CONSOLE -->
-  <div class="app-shell">
-    <aside class="sidebar">
-      <a class="brand" href="#board" aria-label="Mica 首页">
-        <span class="brand-mark">M</span>
-        <span><strong>Mica</strong><small>Agent Control Plane</small></span>
-      </a>
-      <nav class="nav" aria-label="主导航">
-        <a href="#board" data-route="board"><span class="nav-icon">▦</span>任务看板</a>
-        <a href="#agents" data-route="agents"><span class="nav-icon">⌁</span>Agents</a>
-        <a href="#squads" data-route="squads"><span class="nav-icon">◇</span>Squads</a>
-        <a href="#runtimes" data-route="runtimes"><span class="nav-icon">◫</span>运行环境</a>
-      </nav>
-      <div class="sidebar-foot">
-        <div class="health-line"><span class="health-dot" id="health-dot"></span><span id="health-label">正在检查服务</span></div>
-        <small>Web 与飞书共享任务入口</small>
-      </div>
-    </aside>
-    <main class="workspace">
-      <header class="topbar">
-        <div><p class="eyebrow" id="page-eyebrow">MISSION CONTROL</p><h1 id="page-title">任务看板</h1></div>
-        <div class="topbar-actions">
-          <button class="icon-button" id="refresh-button" title="刷新当前页面" aria-label="刷新">↻</button>
-          <button class="primary-button" id="primary-action">＋ 新建任务</button>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <script src="/assets/theme.js"></script>
+    <title>Mica · Agent 工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/detail.css" />
+    <link rel="stylesheet" href="/assets/workbench.css" />
+    <link rel="stylesheet" href="/assets/board.css" />
+    <link rel="stylesheet" href="/assets/theme.css" />
+  </head>
+  <body>
+    <!-- MICA / AGENT CONSOLE -->
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#board" aria-label="Mica 首页">
+          <span class="brand-mark" aria-hidden="true"
+            ><svg viewBox="0 0 24 24">
+              <path d="m4 17 4-10 4 7 4-7 4 10M4 17h16" /></svg
+          ></span>
+          <span><strong>Mica</strong><small>Agent 工作台</small></span>
+        </a>
+        <nav class="nav" aria-label="主导航">
+          <span class="nav-section">任务</span>
+          <a href="#board" data-route="board"
+            ><span class="nav-icon" aria-hidden="true"
+              ><svg viewBox="0 0 24 24">
+                <rect x="3" y="4" width="5" height="16" rx="1.5" />
+                <rect x="10" y="4" width="5" height="10" rx="1.5" />
+                <rect x="17" y="4" width="4" height="13" rx="1.5" /></svg></span
+            >任务看板</a
+          >
+          <span class="nav-section">协作资源</span
+          ><a href="#agents" data-route="agents"
+            ><span class="nav-icon" aria-hidden="true"
+              ><svg viewBox="0 0 24 24">
+                <rect x="4" y="7" width="16" height="13" rx="4" />
+                <path d="M12 3v4M8 12v2m8-2v2M9 17h6" /></svg></span
+            >Agents</a
+          >
+          <a href="#squads" data-route="squads"
+            ><span class="nav-icon" aria-hidden="true"
+              ><svg viewBox="0 0 24 24">
+                <circle cx="9" cy="8" r="3" />
+                <path
+                  d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m3 9v-2a6 6 0 0 0-3-5"
+                /></svg></span
+            >Squads</a
+          >
+          <a href="#runtimes" data-route="runtimes"
+            ><span class="nav-icon" aria-hidden="true"
+              ><svg viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="7" rx="2" />
+                <rect x="3" y="14" width="18" height="7" rx="2" />
+                <path
+                  d="M7 7.5h.01M7 17.5h.01M11 7.5h6M11 17.5h6"
+                /></svg></span
+            >运行环境</a
+          >
+        </nav>
+        <div class="sidebar-foot">
+          <div class="theme-control">
+            <span>界面外观</span>
+            <div class="theme-options" role="group" aria-label="界面外观">
+              <button
+                type="button"
+                data-theme-choice="light"
+                aria-pressed="false"
+              >
+                浅色</button
+              ><button
+                type="button"
+                data-theme-choice="dark"
+                aria-pressed="true"
+              >
+                深色</button
+              ><button
+                type="button"
+                data-theme-choice="system"
+                aria-label="跟随系统"
+                title="跟随系统"
+                aria-pressed="false"
+              >
+                系统
+              </button>
+            </div>
+          </div>
+          <div class="health-line">
+            <span class="health-dot" id="health-dot"></span
+            ><span id="health-label">正在检查服务</span>
+          </div>
+          <small>Web 与飞书共享任务入口</small>
         </div>
-      </header>
-      <div class="page" id="page"><div class="loading-state"><span class="spinner"></span>正在加载工作台…</div></div>
-    </main>
-  </div>
-  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-  <aside class="drawer" id="drawer" aria-hidden="true"><div id="drawer-content"></div></aside>
-  <div class="modal-backdrop" id="modal-backdrop" hidden>
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div id="modal-content"></div></section>
-  </div>
-  <div class="toast-region" id="toast-region" aria-live="polite"></div>
-  <script type="module" src="/assets/app.js?v=claude-permission-protocol"></script>
-</body>
+      </aside>
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">MISSION CONTROL</p>
+            <h1 id="page-title">任务看板</h1>
+          </div>
+          <div class="topbar-actions">
+            <button
+              class="icon-button"
+              id="refresh-button"
+              title="刷新当前页面"
+              aria-label="刷新"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7M20 7l-2.3-2.7" />
+              </svg>
+            </button>
+            <button class="primary-button" id="primary-action">
+              ＋ 新建任务
+            </button>
+          </div>
+        </header>
+        <div class="page" id="page">
+          <div class="loading-state">
+            <span class="spinner"></span>正在加载工作台…
+          </div>
+        </div>
+      </main>
+    </div>
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="drawer" id="drawer" aria-hidden="true">
+      <div id="drawer-content"></div>
+    </aside>
+    <div class="modal-backdrop" id="modal-backdrop" hidden>
+      <section
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+      >
+        <div id="modal-content"></div>
+      </section>
+    </div>
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <script type="module" src="/assets/app.js?v=workbench-v2"></script>
+  </body>
 </html>

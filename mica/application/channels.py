@@ -175,51 +175,57 @@ TERMINAL_EVENT_TYPES = {
 
 
 class TaskNotificationProjector:
-    def __init__(self, events, tasks, channels: ChannelRepository) -> None:
+    def __init__(
+        self, events, tasks, channels: ChannelRepository, transactions=None, issues=None
+    ) -> None:
         self.events = events
         self.tasks = tasks
         self.channels = channels
+        self.transactions = transactions
+        self.issues = issues
         self._cursor_time = datetime.fromtimestamp(0, timezone.utc)
         self._cursor_id = ""
 
     def run_once(self) -> int:
         projected = 0
         for event in self.events.list_after(self._cursor_time, self._cursor_id):
-            if event.event_type not in TERMINAL_EVENT_TYPES:
-                self._advance(event)
-                continue
-            task = self.tasks.get(event.task_id)
-            if task is None:
-                self._advance(event)
-                continue
-            if task.squad_id:
-                if event.event_type == "task.completed":
-                    self._advance(event)
-                    continue
-                if (
-                    event.event_type in {"task.failed", "task.cancelled"}
-                    and not task.is_leader_task
-                ):
-                    self._advance(event)
-                    continue
-            origin = self.channels.get_origin(task.issue_id)
-            if origin is None or origin.channel != "feishu":
-                self._advance(event)
-                continue
-            self.channels.add_outbox(
-                OutboxMessage(
-                    channel="feishu",
-                    destination=origin.conversation_id,
-                    source_event_id=event.id,
-                    message_type=event.event_type,
-                    payload={"text": self._text(event.event_type, task, event.payload)},
-                )
-            )
-            projected += 1
-            # Advance only after the durable outbox write succeeds. A transient
-            # repository failure must not make this process skip the event.
+            transaction = self.transactions.transaction() if self.transactions else nullcontext()
+            with transaction:
+                projected += self._project(event)
+            # Advance only after commit; deletion and notification creation share
+            # the owning issue lock, so a stale snapshot cannot recreate outbox.
             self._advance(event)
         return projected
+
+    def _project(self, event) -> int:
+        if event.event_type not in TERMINAL_EVENT_TYPES:
+            return 0
+        task = self.tasks.get(event.task_id)
+        if task is None:
+            return 0
+        if self.issues is not None:
+            if self.issues.get_for_update(task.issue_id) is None:
+                return 0
+            if self.tasks.get(event.task_id) is None:
+                return 0
+        if task.squad_id:
+            if event.event_type == "task.completed":
+                return 0
+            if event.event_type in {"task.failed", "task.cancelled"} and not task.is_leader_task:
+                return 0
+        origin = self.channels.get_origin(task.issue_id)
+        if origin is None or origin.channel != "feishu":
+            return 0
+        self.channels.add_outbox(
+            OutboxMessage(
+                channel="feishu",
+                destination=origin.conversation_id,
+                source_event_id=event.id,
+                message_type=event.event_type,
+                payload={"text": self._text(event.event_type, task, event.payload)},
+            )
+        )
+        return 1
 
     def _advance(self, event) -> None:
         self._cursor_time, self._cursor_id = event.created_at, event.id

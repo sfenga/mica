@@ -1,0 +1,128 @@
+:root {
+  color-scheme: dark;
+  --primary-hover: #fafafa;
+  --menu-shadow: 0 10px 28px #0005;
+  --scrollbar-thumb: #ffffff14;
+  --sidebar-selected: var(--surface2);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: oklch(0.988087 0 0);
+  --sidebar: oklch(0.964435 0.001327 286.375);
+  --surface: oklch(1 0 0);
+  --surface2: oklch(0.967 0.001 286.375);
+  --surface3: oklch(0.95 0.002 286.375);
+  --surface-hover: oklch(0.967 0.001 286.375);
+  --surface-selected: oklch(0.95 0.002 286.375);
+  --surface-raised: oklch(1 0 0);
+  --surface-border: oklch(0.92 0.004 286.32);
+  --surface-shadow: 0 1px 2px rgb(15 23 42 / 4%), 0 1px 1px rgb(15 23 42 / 3%);
+  --line: oklch(0.945 0.003 286.32);
+  --line2: oklch(0.92 0.004 286.32);
+  --text: oklch(0.141 0.005 285.823);
+  --muted: oklch(0.505 0.016 285.938);
+  --muted2: var(--muted);
+  --accent: oklch(0.21 0.006 285.885);
+  --accent2: oklch(0.56079497 0.19449888 256.41258418);
+  --accentSoft: oklch(0.56079497 0.19449888 256.41258418 / 10%);
+  --blue: oklch(0.55 0.18 250);
+  --blueSoft: oklch(0.55 0.18 250 / 10%);
+  --yellow: oklch(0.75 0.16 85);
+  --yellowSoft: oklch(0.75 0.16 85 / 10%);
+  --red: oklch(0.577 0.245 27.325);
+  --redSoft: oklch(0.577 0.245 27.325 / 10%);
+  --purple: oklch(0.5 0.15 295);
+  --purpleSoft: oklch(0.5 0.15 295 / 10%);
+  --shadow: 0 16px 40px rgb(15 23 42 / 14%), 0 3px 10px rgb(15 23 42 / 8%);
+  --menu-shadow: 0 8px 24px rgb(15 23 42 / 8%), 0 2px 6px rgb(15 23 42 / 5%);
+  --scrollbar-thumb: oklch(0 0 0 / 10%);
+  --sidebar-selected: oklch(0.935 0.003 286.375);
+  --primary-hover: oklch(0.28 0.006 285.885);
+}
+.nav a.active {
+  background: var(--sidebar-selected);
+}
+.primary-button:hover {
+  background: var(--primary-hover);
+}
+.mention-menu {
+  box-shadow: var(--menu-shadow);
+}
+.board-scroller {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.board-workspace .issue-card:hover {
+  border-color: var(--line2);
+}
+.theme-control {
+  margin-bottom: 16px;
+}
+.theme-control > span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0 8px 6px;
+}
+.theme-options {
+  display: flex;
+  gap: 2px;
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 3px;
+}
+.theme-options button {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  padding: 3px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.theme-options button:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.theme-options button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--line);
+  box-shadow: var(--surface-shadow);
+}
+:root[data-theme="light"] .modal-backdrop {
+  background: rgb(15 23 42 / 28%);
+}
+:root[data-theme="light"] .drawer-backdrop {
+  background: rgb(15 23 42 / 18%);
+}
+:root[data-theme="light"] .composer {
+  box-shadow: var(--surface-shadow);
+}
+:root[data-theme="light"] .badge.warning,
+:root[data-theme="light"] .board-workspace .badge.warning,
+:root[data-theme="light"] .status-pill.in_review {
+  color: oklch(0.46 0.1 70);
+}
+:root[data-theme="light"] .toast {
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--menu-shadow);
+  border-color: var(--surface-border);
+}
+:root[data-theme="light"] .closed-discussion,
+:root[data-theme="light"] .runtime-hint {
+  background: var(--surface2);
+  border-color: var(--line2);
+}
+:root[data-theme="light"] .board-workspace .board-column.blocked {
+  background: color-mix(in oklch, var(--surface2) 40%, transparent);
+}
+:root[data-theme="light"] .column-dot.todo {
+  background: var(--muted);
+}
+:root[data-theme="light"] .column-dot.done {
+  background: var(--blue);
+}

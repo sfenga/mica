@@ -15,6 +15,7 @@ from mica.application import (
     TaskService,
     TriggerService,
 )
+from mica.application.deletion import IssueDeletionService
 from mica.application.ports import (
     AgentRepository,
     ChannelRepository,
@@ -51,6 +52,7 @@ from mica.infrastructure.database import (
     PostgresTaskRepository,
     migrate,
 )
+from mica.infrastructure.memory_transaction import MemoryTransactionManager
 from mica.integrations import ChannelDeliveryWorker
 from mica.integrations.feishu import FeishuMessageSender, FeishuWebhook, config_from_env
 from mica.realtime import DatabaseEventRelay, EventBus
@@ -78,6 +80,7 @@ class ApplicationContainer:
     project_service: ProjectService
     squads: SquadRepository
     event_bus: EventBus
+    deletion_service: IssueDeletionService
     issue_service: IssueService
     task_service: TaskService
     trigger_service: TriggerService
@@ -151,11 +154,19 @@ def build_memory_container(
     squads = InMemorySquadRepository()
     event_bus = EventBus()
 
-    issue_service = IssueService(issues)
-    task_service = TaskService(tasks, issues, events, event_bus)
-    squad_service = SquadService(squads, agents, issues, tasks, task_service)
-    trigger_service = TriggerService(issues, agents, issue_service, task_service, squads=squads)
-    ingress_service = IngressService(channels, trigger_service, issue_service)
+    transactions = MemoryTransactionManager([issues, tasks, events, channels, squads])
+    issue_service = IssueService(issues, transactions=transactions)
+    task_service = TaskService(tasks, issues, events, event_bus, transactions=transactions)
+    squad_service = SquadService(
+        squads, agents, issues, tasks, task_service, transactions=transactions
+    )
+    trigger_service = TriggerService(
+        issues, agents, issue_service, task_service, squads=squads, transactions=transactions
+    )
+    ingress_service = IngressService(
+        channels, trigger_service, issue_service, transactions=transactions
+    )
+    deletion_service = IssueDeletionService(issues, tasks, events, channels, transactions)
     providers = _provider_registry()
     slots = RuntimeSlotPool()
     worktrees = _worktree_manager()
@@ -209,7 +220,9 @@ def build_memory_container(
     senders = {"feishu": FeishuMessageSender(feishu_config)} if feishu_config else {}
     channel_worker = ChannelDeliveryWorker(
         channels,
-        TaskNotificationProjector(events, tasks, channels),
+        TaskNotificationProjector(
+            events, tasks, channels, transactions=transactions, issues=issues
+        ),
         senders,
         max_attempts=_positive_int("MICA_CHANNEL_MAX_ATTEMPTS", 8),
     )
@@ -226,6 +239,7 @@ def build_memory_container(
         squads=squads,
         event_bus=event_bus,
         issue_service=issue_service,
+        deletion_service=deletion_service,
         task_service=task_service,
         trigger_service=trigger_service,
         squad_service=squad_service,
@@ -257,6 +271,7 @@ def build_postgres_container(
     projects = PostgresProjectRepository(database)
     squads = PostgresSquadRepository(database)
     event_bus = EventBus()
+    deletion_service = IssueDeletionService(issues, tasks, events, channels, database)
     issue_service = IssueService(issues, transactions=database)
     # PostgreSQL events are published by DatabaseEventRelay after commit, so a
     # rolled-back transaction can never leak a realtime event.
@@ -322,7 +337,7 @@ def build_postgres_container(
     senders = {"feishu": FeishuMessageSender(feishu_config)} if feishu_config else {}
     channel_worker = ChannelDeliveryWorker(
         channels,
-        TaskNotificationProjector(events, tasks, channels),
+        TaskNotificationProjector(events, tasks, channels, transactions=database, issues=issues),
         senders,
         poll_interval=_positive_float("MICA_CHANNEL_POLL_INTERVAL", 2),
         max_attempts=_positive_int("MICA_CHANNEL_MAX_ATTEMPTS", 8),
@@ -340,6 +355,7 @@ def build_postgres_container(
         squads=squads,
         event_bus=event_bus,
         issue_service=issue_service,
+        deletion_service=deletion_service,
         task_service=task_service,
         trigger_service=trigger_service,
         squad_service=squad_service,

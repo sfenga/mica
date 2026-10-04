@@ -45,6 +45,10 @@ class InMemoryIssueRepository:
             self._items[issue.id] = deepcopy(issue)
             return deepcopy(issue)
 
+    def delete(self, issue_id: str) -> None:
+        with self._lock:
+            self._items.pop(issue_id, None)
+
     def list(self) -> List[Issue]:
         with self._lock:
             return [
@@ -84,9 +88,7 @@ class InMemoryTaskRepository:
             if queued.trigger_comment_id:
                 previous_ids.append(queued.trigger_comment_id)
             queued.merged_comment_ids = list(
-                dict.fromkeys(
-                    item for item in previous_ids if item != task.trigger_comment_id
-                )
+                dict.fromkeys(item for item in previous_ids if item != task.trigger_comment_id)
             )
             queued.trigger_type = task.trigger_type
             queued.trigger_id = task.trigger_id
@@ -197,6 +199,12 @@ class InMemoryTaskRepository:
                     recovered.append(deepcopy(task))
         return recovered
 
+    def delete_for_issue(self, issue_id: str) -> None:
+        with self._lock:
+            self._items = {
+                key: task for key, task in self._items.items() if task.issue_id != issue_id
+            }
+
     def request_cancel(self, task_id: str) -> Optional[Task]:
         with self._lock:
             task = self._items.get(task_id)
@@ -238,6 +246,10 @@ class InMemoryTaskRepository:
 
 
 class InMemoryEventRepository:
+    def delete_for_tasks(self, task_ids: List[str]) -> None:
+        with self._lock:
+            self._items = [event for event in self._items if event.task_id not in task_ids]
+
     def __init__(self) -> None:
         self._items: List[TaskEvent] = []
         self._lock = RLock()
@@ -312,9 +324,7 @@ class InMemoryRuntimeCapabilityRepository:
         self, runtime_id: str, capabilities: List[RuntimeCapability]
     ) -> List[RuntimeCapability]:
         with self._lock:
-            self._items = {
-                key: value for key, value in self._items.items() if key[0] != runtime_id
-            }
+            self._items = {key: value for key, value in self._items.items() if key[0] != runtime_id}
             for capability in capabilities:
                 self._items[(runtime_id, capability.provider)] = capability
             return list(capabilities)
@@ -322,7 +332,9 @@ class InMemoryRuntimeCapabilityRepository:
     def list(self, runtime_id: Optional[str] = None) -> List[RuntimeCapability]:
         with self._lock:
             values = list(self._items.values())
-            return [item for item in values if item.runtime_id == runtime_id] if runtime_id else values
+            return (
+                [item for item in values if item.runtime_id == runtime_id] if runtime_id else values
+            )
 
     def get(self, runtime_id: str, provider: str) -> Optional[RuntimeCapability]:
         with self._lock:
@@ -373,7 +385,11 @@ class InMemoryProjectRepository:
     def list(self, workspace_id: Optional[str] = None) -> List[Project]:
         with self._lock:
             values = list(self._items.values())
-            return [item for item in values if item.workspace_id == workspace_id] if workspace_id else values
+            return (
+                [item for item in values if item.workspace_id == workspace_id]
+                if workspace_id
+                else values
+            )
 
 
 class InMemorySquadRepository:

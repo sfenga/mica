@@ -142,9 +142,7 @@ class SquadService:
         previous_leader = members.get(squad.leader_agent_id)
         with self._transaction():
             if previous_leader is not None and previous_leader.agent_id != leader_agent_id:
-                self.squads.add_member(
-                    replace(previous_leader, role="member")
-                )
+                self.squads.add_member(replace(previous_leader, role="member"))
             new_leader = members.get(leader_agent_id)
             self.squads.add_member(
                 replace(new_leader, role="leader")
@@ -301,7 +299,7 @@ class SquadService:
         with self._transaction():
             issue = self.issues.get_for_update(task.issue_id)
             if issue is None:
-                raise NotFoundError(f"issue not found: {task.issue_id}")
+                return
             self.task_service.record(
                 task.id,
                 "squad.leader_decision",

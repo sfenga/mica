@@ -93,6 +93,10 @@ class PostgresIssueRepository:
             )
         return issue
 
+    def delete(self, issue_id: str) -> None:
+        with self.database.connection() as connection:
+            connection.execute("DELETE FROM issue WHERE id=%s", (issue_id,))
+
     def get(self, issue_id: str) -> Optional[Issue]:
         with self.database.connection() as connection:
             row = connection.execute("SELECT * FROM issue WHERE id = %s", (issue_id,)).fetchone()
@@ -217,7 +221,7 @@ class PostgresTaskRepository:
         with self.database.connection() as connection:
             row = connection.execute(
                 f"""INSERT INTO agent_task ({TASK_COLUMNS})
-                VALUES ({', '.join(['%s'] * len(values))})
+                VALUES ({", ".join(["%s"] * len(values))})
                 ON CONFLICT (issue_id, agent_id) WHERE status='queued'
                 DO UPDATE SET
                     merged_comment_ids = array_remove(
@@ -300,9 +304,7 @@ class PostgresTaskRepository:
         return [_task(row) for row in rows]
 
     def claim_next(self, runtime_id: str, worker_id: str, lease_seconds: int) -> Optional[Task]:
-        returned_columns = ", ".join(
-            "task." + name.strip() for name in TASK_COLUMNS.split(",")
-        )
+        returned_columns = ", ".join("task." + name.strip() for name in TASK_COLUMNS.split(","))
         with self.database.connection() as connection:
             row = connection.execute(
                 f"""WITH candidate AS (
@@ -377,6 +379,10 @@ class PostgresTaskRepository:
             ).fetchall()
         return [_task(row) for row in rows]
 
+    def delete_for_issue(self, issue_id: str) -> None:
+        with self.database.connection() as connection:
+            connection.execute("DELETE FROM agent_task WHERE issue_id=%s", (issue_id,))
+
     def request_cancel(self, task_id: str) -> Optional[Task]:
         with self.database.connection() as connection:
             row = connection.execute(
@@ -448,6 +454,10 @@ class PostgresTaskRepository:
 
 
 class PostgresEventRepository:
+    def delete_for_tasks(self, task_ids: List[str]) -> None:
+        with self.database.connection() as connection:
+            connection.execute("DELETE FROM task_event WHERE task_id=ANY(%s)", (task_ids,))
+
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
 
@@ -701,9 +711,7 @@ class PostgresProjectRepository:
 
     def get(self, project_id: str) -> Optional[Project]:
         with self.database.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM project WHERE id=%s", (project_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM project WHERE id=%s", (project_id,)).fetchone()
         return self._from_row(row) if row else None
 
     def find_by_path(

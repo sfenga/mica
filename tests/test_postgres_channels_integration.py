@@ -13,9 +13,13 @@ class RollbackSmokeTest(Exception):
     pass
 
 
-@pytest.mark.skipif(not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database")
+@pytest.mark.skipif(
+    not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database"
+)
 def test_postgres_ingress_is_atomic_and_idempotent():
-    container = build_postgres_container(os.environ["MICA_TEST_DATABASE_URL"], default_provider="stub")
+    container = build_postgres_container(
+        os.environ["MICA_TEST_DATABASE_URL"], default_provider="stub"
+    )
     event_id = f"integration-{uuid4().hex}"
     issue_id = None
 
@@ -53,7 +57,9 @@ def test_postgres_ingress_is_atomic_and_idempotent():
     assert row is None
 
 
-@pytest.mark.skipif(not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database")
+@pytest.mark.skipif(
+    not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database"
+)
 def test_postgres_squad_routing_persists_task_provenance():
     container = build_postgres_container(os.environ["MICA_TEST_DATABASE_URL"])
     suffix = uuid4().hex
@@ -121,9 +127,7 @@ def test_postgres_squad_follow_up_waits_for_delegated_worker():
                     {
                         "decision": "delegate",
                         "summary": "delegate",
-                        "assignments": [
-                            {"agent_id": worker_id, "instruction": "check constraint"}
-                        ],
+                        "assignments": [{"agent_id": worker_id, "instruction": "check constraint"}],
                     }
                 ),
                 None,
@@ -165,3 +169,87 @@ def test_postgres_merges_queued_comments_and_snapshots_them_when_claimed():
             raise RollbackSmokeTest
     except RollbackSmokeTest:
         pass
+
+
+@pytest.mark.skipif(
+    not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database"
+)
+def test_postgres_issue_deletion_cleans_references_and_rolls_back():
+    from unittest.mock import patch
+
+    from mica.domain import OutboxMessage
+
+    container = build_postgres_container(
+        os.environ["MICA_TEST_DATABASE_URL"], default_provider="stub"
+    )
+    issue = container.ingress_service.submit(
+        IngressCommand(
+            channel="web",
+            tenant_key="delete-test",
+            external_event_id=uuid4().hex,
+            external_user_id="delete-user",
+            display_name="Delete User",
+            conversation_id="delete-user",
+            title="Delete integration",
+            body="transaction cleanup",
+            workspace_id="delete-test",
+            assignee_id="local-assistant",
+        )
+    )[0]
+    try:
+        container.trigger_service.add_comment(issue.id, "follow-up", "delete-user")
+        task = container.tasks.list(issue.id)[0]
+        event = container.events.list(task.id)[0]
+        notice = container.channels.add_outbox(
+            OutboxMessage(
+                channel="test",
+                destination="test",
+                source_event_id=event.id,
+                message_type="test",
+                payload={"text": "task event without issue_id"},
+            )
+        )
+        unrelated_notice = container.channels.add_outbox(
+            OutboxMessage(
+                channel="other",
+                destination="test",
+                source_event_id=container.channels.get_origin(issue.id).external_message_id,
+                message_type="test",
+                payload={"text": "same ingress ID, other channel"},
+            )
+        )
+        with patch.object(container.issues, "delete", side_effect=RuntimeError("delete failed")):
+            with pytest.raises(RuntimeError):
+                container.deletion_service.delete(issue.id)
+        assert container.issues.get(issue.id) is not None
+        assert container.events.list(task.id)
+        assert container.channels.get_origin(issue.id) is not None
+        with container.database.connection() as connection:
+            assert connection.execute(
+                "SELECT 1 FROM outbox_message WHERE id=%s", (notice.id,)
+            ).fetchone()
+        container.deletion_service.delete(issue.id)
+        assert container.issues.get(issue.id) is None
+        assert container.tasks.list(issue.id) == []
+        assert container.events.list(task.id) == []
+        with container.database.connection() as connection:
+            assert (
+                connection.execute(
+                    "SELECT 1 FROM external_event WHERE issue_id=%s", (issue.id,)
+                ).fetchone()
+                is None
+            )
+            assert (
+                connection.execute(
+                    "SELECT 1 FROM outbox_message WHERE id=%s", (notice.id,)
+                ).fetchone()
+                is None
+            )
+        with container.database.connection() as connection:
+            assert connection.execute(
+                "SELECT 1 FROM outbox_message WHERE id=%s", (unrelated_notice.id,)
+            ).fetchone()
+            connection.execute("DELETE FROM outbox_message WHERE id=%s", (unrelated_notice.id,))
+    finally:
+        if container.issues.get(issue.id) is not None:
+            container.deletion_service.delete(issue.id)

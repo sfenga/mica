@@ -39,6 +39,18 @@ class PostgresChannelRepository:
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
 
+    def delete_issue_data(self, issue_id: str, event_ids: list[str]) -> None:
+        with self.database.connection() as connection:
+            connection.execute(
+                """DELETE FROM outbox_message WHERE source_event_id=ANY(%s)
+                OR payload->>'issue_id'=%s
+                OR (channel, source_event_id) IN (SELECT channel, external_event_id
+                    FROM external_event WHERE issue_id=%s)""",
+                (event_ids, issue_id, issue_id),
+            )
+            connection.execute("DELETE FROM external_event WHERE issue_id=%s", (issue_id,))
+            connection.execute("DELETE FROM issue_origin WHERE issue_id=%s", (issue_id,))
+
     def resolve_identity(
         self,
         channel: str,

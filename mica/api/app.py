@@ -121,9 +121,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
             if request.project_id:
                 project = state.project_service.get(request.project_id)
                 if project.workspace_id != request.workspace_id:
-                    raise NotFoundError(
-                        f"project not found in workspace: {request.project_id}"
-                    )
+                    raise NotFoundError(f"project not found in workspace: {request.project_id}")
                 project_path = project.local_path
                 project_execution_mode = project.execution_mode
             if request.assignee_type.value == "agent":
@@ -180,6 +178,16 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
     @app.get("/api/issues")
     def list_issues():
         return [_document(issue) for issue in state.issue_service.list()]
+
+    @app.delete("/api/issues/{issue_id}", status_code=204)
+    def delete_issue(issue_id: str) -> Response:
+        try:
+            state.deletion_service.delete(issue_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="删除任务失败，请重试") from exc
+        return Response(status_code=204)
 
     @app.get("/api/issues/{issue_id}")
     def get_issue(issue_id: str) -> Dict[str, Any]:
@@ -258,9 +266,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
 
     @app.get("/api/runtime-capabilities")
     def list_runtime_capabilities(runtime_id: Optional[str] = None):
-        return [
-            _document(item) for item in state.runtime_capabilities.list(runtime_id)
-        ]
+        return [_document(item) for item in state.runtime_capabilities.list(runtime_id)]
 
     @app.post("/api/runtimes", status_code=201)
     def create_runtime(request: CreateRuntimeRequest) -> Dict[str, Any]:
@@ -284,9 +290,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
     @app.post("/api/runtimes/{runtime_id}/probe")
     def probe_runtime(runtime_id: str):
         try:
-            return [
-                _document(item) for item in state.runtime_discovery.probe(runtime_id)
-            ]
+            return [_document(item) for item in state.runtime_discovery.probe(runtime_id)]
         except NotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

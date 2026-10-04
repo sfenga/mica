@@ -39,7 +39,7 @@ include = ["mica*"]
 
 [tool.setuptools.package-data]
 "mica.infrastructure.database" = ["sql/*.sql"]
-"mica.web" = ["*.html", "*.css", "*.js"]
+"mica.web" = ["*.html", "*.css", "*.js", "lib/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

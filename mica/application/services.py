@@ -147,33 +147,35 @@ class TaskService:
         handoff_note: Optional[str] = None,
         merge_comment: bool = False,
     ) -> Task:
-        task = Task(
-            issue_id=issue.id,
-            agent_id=agent_id,
-            runtime_id=runtime_id,
-            trigger_type=trigger_type,
-            trigger_id=trigger_id,
-            squad_id=squad_id,
-            is_leader_task=is_leader_task,
-            delegated_from_task_id=delegated_from_task_id,
-            handoff_note=handoff_note,
-            trigger_comment_id=trigger_id if trigger_type == "comment.created" else None,
-        )
-        merged = False
-        if merge_comment and task.trigger_comment_id:
-            task, merged = self.tasks.enqueue_or_merge(task)
-        else:
-            task = self.tasks.add(task)
-        self.record(
-            task.id,
-            "task.input_merged" if merged else "task.queued",
-            {
-                "issue_id": issue.id,
-                "runtime_id": runtime_id,
-                "comment_id": task.trigger_comment_id,
-            },
-        )
-        return task
+        with self._transaction():
+            self._get_issue(issue.id, for_update=True)
+            task = Task(
+                issue_id=issue.id,
+                agent_id=agent_id,
+                runtime_id=runtime_id,
+                trigger_type=trigger_type,
+                trigger_id=trigger_id,
+                squad_id=squad_id,
+                is_leader_task=is_leader_task,
+                delegated_from_task_id=delegated_from_task_id,
+                handoff_note=handoff_note,
+                trigger_comment_id=trigger_id if trigger_type == "comment.created" else None,
+            )
+            merged = False
+            if merge_comment and task.trigger_comment_id:
+                task, merged = self.tasks.enqueue_or_merge(task)
+            else:
+                task = self.tasks.add(task)
+            self.record(
+                task.id,
+                "task.input_merged" if merged else "task.queued",
+                {
+                    "issue_id": issue.id,
+                    "runtime_id": runtime_id,
+                    "comment_id": task.trigger_comment_id,
+                },
+            )
+            return task
 
     def get(self, task_id: str) -> Task:
         task = self.tasks.get(task_id)
@@ -212,8 +214,8 @@ class TaskService:
         return task
 
     def is_cancel_requested(self, task_id: str) -> bool:
-        task = self.get(task_id)
-        return task.cancel_requested or task.status == TaskStatus.CANCELLED
+        task = self.tasks.get(task_id)
+        return task is None or task.cancel_requested or task.status == TaskStatus.CANCELLED
 
     def cancel_running(
         self,
@@ -403,10 +405,14 @@ class TaskService:
         return task
 
     def record(self, task_id: str, event_type: str, payload: Dict[str, Any]) -> TaskEvent:
-        event = self.events.add(TaskEvent(task_id=task_id, event_type=event_type, payload=payload))
-        if self.publisher is not None:
-            self.publisher.publish(event)
-        return event
+        with self._transaction():
+            self._locked_task(task_id)
+            event = self.events.add(
+                TaskEvent(task_id=task_id, event_type=event_type, payload=payload)
+            )
+            if self.publisher is not None:
+                self.publisher.publish(event)
+            return event
 
     def _get_issue(self, issue_id: str, for_update: bool = False) -> Issue:
         issue = self.issues.get_for_update(issue_id) if for_update else self.issues.get(issue_id)
@@ -415,6 +421,10 @@ class TaskService:
         return issue
 
     def _locked_task(self, task_id: str) -> Task:
+        existing = self.tasks.get(task_id)
+        if existing is None:
+            raise NotFoundError(f"task not found: {task_id}")
+        self._get_issue(existing.issue_id, for_update=True)
         task = self.tasks.get_for_update(task_id)
         if task is None:
             raise NotFoundError(f"task not found: {task_id}")
@@ -557,11 +567,7 @@ class TriggerService:
                 targets.append((self._get_agent(squad.leader_agent_id), squad.id, True))
         if not targets and comment.parent_comment_id:
             parent = next(
-                (
-                    item
-                    for item in issue.comments
-                    if item.id == comment.parent_comment_id
-                ),
+                (item for item in issue.comments if item.id == comment.parent_comment_id),
                 None,
             )
             if parent and parent.source_task_id:
@@ -588,10 +594,7 @@ class TriggerService:
                         break
                     root = next_root
                 for task in self.task_service.tasks.list(issue.id):
-                    if (
-                        task.trigger_comment_id == root.id
-                        or root.id in task.merged_comment_ids
-                    ):
+                    if task.trigger_comment_id == root.id or root.id in task.merged_comment_ids:
                         targets.append(
                             (
                                 self._get_agent(task.agent_id),

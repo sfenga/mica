@@ -25,6 +25,28 @@ class InMemoryChannelRepository:
         self._outbox_keys: Dict[tuple[str, str, str], str] = {}
         self.lock = RLock()
 
+    def delete_issue_data(self, issue_id: str, event_ids: list[str]) -> None:
+        with self.lock:
+            ingress_keys = {
+                (event.channel, event.external_event_id)
+                for event in self._events.values()
+                if event.issue_id == issue_id
+            }
+            self._outbox = {
+                key: message
+                for key, message in self._outbox.items()
+                if message.source_event_id not in event_ids
+                and (message.channel, message.source_event_id) not in ingress_keys
+                and message.payload.get("issue_id") != issue_id
+            }
+            self._outbox_keys = {
+                key: value for key, value in self._outbox_keys.items() if value in self._outbox
+            }
+            self._events = {
+                key: event for key, event in self._events.items() if event.issue_id != issue_id
+            }
+            self._origins.pop(issue_id, None)
+
     def resolve_identity(
         self,
         channel: str,
