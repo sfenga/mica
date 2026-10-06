@@ -625,11 +625,20 @@ class PostgresRuntimeCapabilityRepository:
                     "DELETE FROM runtime_capability WHERE runtime_id=%s", (runtime_id,)
                 )
                 for item in capabilities:
+                    # The API process and the daemon both probe at startup; with a
+                    # plain INSERT the loser of that race raises UniqueViolation and
+                    # exits. Upsert so concurrent probes converge instead.
                     connection.execute(
                         """INSERT INTO runtime_capability(
                             runtime_id, provider, executable_path, version,
                             status, error, detected_at
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (runtime_id, provider) DO UPDATE SET
+                            executable_path=EXCLUDED.executable_path,
+                            version=EXCLUDED.version,
+                            status=EXCLUDED.status,
+                            error=EXCLUDED.error,
+                            detected_at=EXCLUDED.detected_at""",
                         (
                             item.runtime_id,
                             item.provider,
