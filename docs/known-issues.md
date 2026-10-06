@@ -211,7 +211,7 @@ Task
 
 ## KI-002：多 Agent 上下文不完整且 Session 作用域过粗
 
-- **状态**：待设计
+- **状态**：待设计（阶段一简化版已于 2026-10-06 落地：CLI Agent 的任务级只读通道 `mica-ctx`）
 - **优先级**：P1
 - **涉及模块**：Task Prompt、Provider Session、Squad、Worktree
 
@@ -225,9 +225,13 @@ Mica 采用“平台拼接本轮 Prompt + 复用 Provider Session”的方式：
 - Squad Leader 额外得到成员清单，以及最近 20 条终态 Worker Task 的 `output/error` 摘要，每条最多 500 字符。
 - Daemon 按 `(issue_id, agent_id)` 查找最近的 Session、分支和 Worktree 继续执行。
 
+> **2026-10-06 进展**：CLI Provider（Codex/Claude）的任务现在额外携带 `mica-ctx` 读取通道：Daemon 为子进程注入 `MICA_API_URL`/`MICA_ISSUE_ID`/`MICA_TASK_ID` 并把入口前置进 PATH，Prompt 按冷/热恢复两档追加读取指令，Agent 可用 `mica-ctx comments` / `mica-ctx comment <id>` 按需拉取本 Issue 完整评论。实现见 `mica/ctx.py`、`mica/runtime/providers/base.py`（`build_child_env`、`build_task_prompt`）与提交 `c848ae2`；测试见 `tests/test_ctx_channel.py`、`tests/test_squad_orchestration.py::test_squad_member_prompt_carries_ctx_channel`。
+>
+> 剩余缺口不变：通道"可达"而非"必读"（无读取回执，取决于模型行为）；拉取的是读取时刻 live 现场，不冻结版本；ACP/A2A Provider 未接入；`MICA_TASK_TOKEN` 仅占位透传；文件级 Artifact 交接、Session 角色隔离、已读游标均未实现。
+
 ### 核心缺陷
 
-1. **Worker 缺少共享上下文**：不会自动获得 Issue 历史评论、用户后续补充、其他 Worker 结果和 Artifact；Leader 如果没有在 `handoff_note` 中复述，Worker 就可能遗漏约束。
+1. **Worker 缺少共享上下文**：不会自动获得 Issue 历史评论、用户后续补充、其他 Worker 结果和 Artifact；Leader 如果没有在 `handoff_note` 中复述，Worker 就可能遗漏约束。（2026-10-06 起 CLI Worker 可经 `mica-ctx` 自助拉取评论全文，属部分缓解；ACP/A2A Worker 与"确保读到"仍未解决。）
 2. **Leader 摘要不能作为事实源**：最近 20 条、每条 500 字符的 Task 输出可能截断 JSON、混入旧批次，也无法稳定引用附件和结构化结果。
 3. **Session 作用域不区分角色**：仅使用 `(issue_id, agent_id)`，没有区分普通执行、Squad Leader、Squad Worker 和不同 Squad；同一 Agent 切换角色时可能恢复带有旧角色要求的 Session。
 4. **Session 恢复缺少安全判断**：当前没有按 Runtime 和失败原因过滤不可恢复 Session；上下文溢出、Provider 拒绝旧历史或 Runtime 变化后可能继续使用无效 Session。
@@ -961,3 +965,39 @@ Mica 的 `done` 事项保留在已完成列，`cancelled` 事项被默认看板�
 - 前端测试覆盖提交期间禁止关闭与重复提交、失败后重试，以及成功后的刷新错误不误报删除失败。
 - 浏览器核对详情菜单、卡片菜单、右键菜单和共享确认弹窗；390px 窄屏弹窗不超出屏幕。
 - 第一版仍采用异步停止语义：删除成功表示平台记录已删除，执行器可能随后才退出。
+
+### 后续调整记录
+
+- 2026-10-06（`c69422f`）：交互打磨，偏离原"已确认的前端方案"第 2 条——看板卡片不再渲染 `⋯` 按钮，右键菜单与键盘 ContextMenu/Shift+F10 直接锚定卡片本身；确认弹窗改为无 `×` 关闭按钮的变体，背景点击不再关闭、焦点圈定在弹窗内、`alertdialog` 语义、提交中 `aria-busy`。弹窗文案精简为"将永久删除该任务及其讨论和执行记录。此操作不可撤销。"（后端行为不变：分支与 Worktree 仍保留）。前端测试同步更新，仍为 15 项通过。
+
+---
+
+## KI-018：API 与 Daemon 并发启动探测在 runtime_capability 唯一键上互撞退出
+
+- **状态**：已完成（2026-10-06）
+- **优先级**：P1（两个进程同时启动必现其一崩溃退出，正常启动顺序依赖运气）
+- **发现日期**：2026-10-06（服务重启时实际触发，非测试发现）
+- **涉及模块**：`RuntimeDiscoveryService`、`PostgresRuntimeCapabilityRepository`、启动引导
+
+### 修复前行为与证据
+
+`mica.main`（`bootstrap.py`）与 `mica.daemon_main` 启动时都会执行 `runtime_discovery.probe()`，写入路径是 `replace_for_runtime()` 的"事务内 DELETE + 逐行 INSERT"。两个进程并发执行时，后插入的一方在 `(runtime_id, provider)` 主键上阻塞等待，对方提交后抛出：
+
+```text
+psycopg.errors.UniqueViolation: duplicate key value violates
+unique constraint "runtime_capability_pkey"
+DETAIL: Key (runtime_id, provider)=(local, claude) already exists.
+```
+
+进程随即退出。2026-10-06 同时启动 API 与 Daemon 时实测复现；错开启动顺序则不会触发。
+
+### 修复方式
+
+INSERT 改为 `ON CONFLICT (runtime_id, provider) DO UPDATE`（`mica/infrastructure/database/repositories.py`）：并发探测中落后的一方把冲突行更新为自己的探测结果，而不是报错退出。DELETE 保留，用于清理不再被探测到的 Provider 行。两个进程在同一台机器探测结果一致，并发收敛后的最终状态等价。
+
+### 完成记录
+
+- 2026-10-06：修复提交 `65e1f36`。
+- 测试：`tests/test_runtime_discovery.py::test_concurrent_probe_replace_converges_without_unique_violation` 用两个真实 PostgreSQL 连接复现"一个事务保持 DELETE+INSERT 未提交，另一线程并发执行 replace"的交错。双向验证：旧代码下该测试抛出与线上一致的 UniqueViolation，修复后通过。
+- 全量测试 294 项通过（含 `MICA_TEST_DATABASE_URL` 指向的临时库的 PostgreSQL 集成测试）。
+- 内存仓储无此约束，不受影响；该问题原先未收录进本文档，本次直接以已完成条目补录。
