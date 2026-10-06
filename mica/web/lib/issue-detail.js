@@ -22,7 +22,7 @@ import { commentThreads } from "./comments.js";
 import { mountComposer } from "./composer.js";
 import { executionCard, loadEvents } from "./executions.js";
 
-import { issueMenuButton, bindIssueMenu } from "./issue-actions.js";
+import { issueMenuButton, bindIssueMenu } from "./issue-actions.js?v=delete-ui-v6";
 
 let current = null;
 export function disposeIssue() {

@@ -9,8 +9,8 @@ import {
   assignee,
 } from "./state.js";
 import { api, jsonOptions } from "./api.js";
-import { showCreateIssue } from "./forms.js";
-import { issueMenuButton, bindIssueMenu, openIssueMenu } from "./issue-actions.js";
+import { showCreateIssue } from "./forms.js?v=delete-ui-v6";
+import { openIssueMenu } from "./issue-actions.js?v=delete-ui-v6";
 
 let refresh, openIssue, render;
 
@@ -43,7 +43,7 @@ function issueCard(issue) {
       ? `<div class="progress" title="${finished}/${squadTasks.length} 个成员任务已结束"><span style="width:${(finished / squadTasks.length) * 100}%"></span></div>`
       : "";
   return `<article class="issue-card" role="button" tabindex="0" draggable="true" data-issue-id="${esc(issue.id)}" data-status="${esc(issue.status)}">
-    <div class="card-top"><span class="card-kind">${owner.type === "squad" ? "Squad" : owner.type === "remote" ? "远程 Agent" : "Agent"}</span>${latest ? badge(TASK_LABEL[latest.status] || latest.status, waiting ? "warning" : failed ? "danger" : "neutral") : ""}${issueMenuButton(issue.id)}</div>
+    <div class="card-top"><span class="card-kind">${owner.type === "squad" ? "Squad" : owner.type === "remote" ? "远程 Agent" : "Agent"}</span>${latest ? badge(TASK_LABEL[latest.status] || latest.status, waiting ? "warning" : failed ? "danger" : "neutral") : ""}</div>
     <h3 class="card-title">${esc(issue.title)}</h3>${note}${progress}
     <div class="card-foot"><span class="assignee"><span class="assignee-avatar" aria-hidden="true">${esc(owner.name.slice(0, 1).toUpperCase())}</span>${esc(owner.name)}</span><span>${formatTime(issue.updated_at)}</span></div>
   </article>`;
@@ -121,13 +121,11 @@ function setupBoardEvents() {
     (button) => (button.onclick = showCreateIssue),
   );
   $$(".issue-card").forEach((card) => {
-    const button = card.querySelector("[data-issue-menu]");
     const getIssue = () => state.issues.find((issue) => issue.id === card.dataset.issueId);
-    bindIssueMenu(button, getIssue);
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       const issue = getIssue();
-      if (issue) openIssueMenu(issue, button, { x: event.clientX, y: event.clientY });
+      if (issue) openIssueMenu(issue, card, { x: event.clientX, y: event.clientY });
     });
     card.addEventListener("click", () => openIssue(card.dataset.issueId));
     card.addEventListener("keydown", (event) => {
@@ -135,7 +133,7 @@ function setupBoardEvents() {
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
         const issue = getIssue();
-        if (issue) openIssueMenu(issue, button);
+        if (issue) openIssueMenu(issue, card);
       }
       if (["Enter", " "].includes(event.key)) {
         event.preventDefault();

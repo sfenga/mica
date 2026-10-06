@@ -1,5 +1,5 @@
 import { esc } from "./ui.js";
-import { showDeleteIssue } from "./forms.js";
+import { showDeleteIssue } from "./forms.js?v=delete-ui-v6";
 
 let menu = null, anchor = null;
 function closeMenu(restore = false) {
@@ -17,7 +17,7 @@ export function openIssueMenu(issue, source, position) {
   menu.className = "issue-action-menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", `${issue.title}的操作`);
-  menu.innerHTML = `<button role="menuitem" class="issue-delete-action">${trashIcon} 删除任务…</button>`;
+  menu.innerHTML = `<button role="menuitem" class="issue-delete-action">${trashIcon} 删除任务</button>`;
   document.body.append(menu);
   const rect = source.getBoundingClientRect();
   const x = position?.x ?? rect.right - menu.offsetWidth;
@@ -30,7 +30,7 @@ export function openIssueMenu(issue, source, position) {
 }
 export const trashIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>`;
 export function issueMenuButton(issueId) {
-  return `<button class="icon-button issue-menu-button" data-issue-menu="${esc(issueId)}" aria-label="任务更多操作" aria-haspopup="menu" aria-expanded="false" title="更多操作">⋯</button>`;
+  return `<button class="icon-button issue-menu-button" data-issue-menu="${esc(issueId)}" aria-label="任务更多操作" aria-haspopup="menu" aria-expanded="false" title="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>`;
 }
 export function bindIssueMenu(button, getIssue) {
   button.onclick = (event) => {

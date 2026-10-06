@@ -11,15 +11,15 @@ import {
 } from "./lib/ui.js";
 import { state } from "./lib/state.js";
 import { api, loadData } from "./lib/api.js";
-import { mountIssue, refreshIssue, disposeIssue } from "./lib/issue-detail.js";
+import { mountIssue, refreshIssue, disposeIssue } from "./lib/issue-detail.js?v=delete-ui-v6";
 
-import { renderBoard, configureBoard } from "./lib/board.js";
+import { renderBoard, configureBoard } from "./lib/board.js?v=delete-ui-v6";
 import {
   renderAgents,
   renderSquads,
   renderRuntimeNodes,
   bindRegistryKeys,
-} from "./lib/registry.js";
+} from "./lib/registry.js?v=delete-ui-v6";
 import {
   configureForms,
   showCreateIssue,
@@ -27,7 +27,7 @@ import {
   showAgentForm,
   probeConfiguredRuntime,
   closeModal,
-} from "./lib/forms.js";
+} from "./lib/forms.js?v=delete-ui-v6";
 
 configureForms({ refresh, openIssue, openDrawer, onIssueDeleted });
 async function onIssueDeleted(id) {
@@ -209,8 +209,11 @@ $("#refresh-button").onclick = async () => {
   }
 };
 $("#drawer-backdrop").onclick = closeDrawer;
+$("#modal-backdrop").addEventListener("pointerdown", (event) => {
+  if (event.target === event.currentTarget && event.currentTarget.dataset.confirmation) event.preventDefault();
+});
 $("#modal-backdrop").addEventListener("click", (event) => {
-  if (event.target === $("#modal-backdrop")) closeModal();
+  if (event.target === $("#modal-backdrop") && !event.currentTarget.dataset.confirmation) closeModal();
 });
 window.addEventListener("hashchange", setRoute);
 window.addEventListener("keydown", (event) => {
@@ -229,7 +232,10 @@ window.addEventListener("keydown", (event) => {
     }
     const first = elements[0],
       last = elements.at(-1);
-    if (event.shiftKey && document.activeElement === first) {
+    if (!$("#modal-content").contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last?.focus();
     } else if (!event.shiftKey && document.activeElement === last) {

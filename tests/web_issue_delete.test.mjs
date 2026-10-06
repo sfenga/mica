@@ -12,7 +12,7 @@ function fixture() {
   });
   for (const selector of [".modal", "#modal-content", "#modal-backdrop", "[data-close-modal]",
     "#cancel-delete", "#confirm-delete", "#delete-error", "#toast-region"]) elements.set(selector, element());
-  const buttons = [elements.get("[data-close-modal]"), elements.get("#cancel-delete"), elements.get("#confirm-delete")];
+  const buttons = [elements.get("#cancel-delete"), elements.get("#confirm-delete")];
   elements.get("#modal-content").querySelectorAll = (selector) => selector === "button" ? buttons : [];
   globalThis.document = {
     activeElement: element(), querySelector: (selector) => elements.get(selector) || null,
@@ -39,7 +39,9 @@ test("delete confirmation blocks close and duplicate submits until success", asy
       return await new Promise((resolve) => complete = resolve);
     };
     showDeleteIssue(state.issues[0]);
-    assert.match(elements.get("#modal-content").innerHTML, /&lt;test&gt;/);
+    assert.doesNotMatch(elements.get("#modal-content").innerHTML, /data-close-modal|&lt;test&gt;/);
+    assert.match(elements.get("#modal-content").innerHTML, /关联的 Agent 执行将被取消/);
+    assert.equal(elements.get("#modal-backdrop").dataset.confirmation, "1");
     const pending = elements.get("#confirm-delete").onclick();
     assert.ok(buttons.every((button) => button.disabled));
     closeModal();

@@ -5,7 +5,7 @@ import {
   openSquad,
   showEditRuntime,
   probeRuntime,
-} from "./forms.js";
+} from "./forms.js?v=delete-ui-v6";
 const searches = {};
 const icons = {
   agent:

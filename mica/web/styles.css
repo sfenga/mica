@@ -1065,24 +1065,42 @@ select:focus {
 
 /* Shared destructive issue actions, matching the workbench theme. */
 .issue-heading-actions { display: flex; align-items: center; gap: 8px; }
-.issue-menu-button { flex-shrink: 0; font-size: 22px; line-height: 1; }
-.issue-card .issue-menu-button { opacity: 0; width: 28px; height: 28px; }
-.issue-card:hover .issue-menu-button, .issue-card:focus-within .issue-menu-button,
-.issue-card .issue-menu-button[aria-expanded="true"] { opacity: 1; }
-.issue-action-menu { position: fixed; z-index: 110; min-width: 168px; padding: 4px;
+.issue-menu-button { flex-shrink: 0; width: 28px; height: 28px; min-height: 28px;
+  border-color: transparent; background: transparent; }
+.issue-menu-button svg { width: 16px; height: 16px; fill: currentColor; }
+.issue-action-menu { position: fixed; z-index: 110; min-width: 128px; padding: 4px;
   border: 1px solid var(--line2); border-radius: 8px; background: var(--surface);
   box-shadow: var(--menu-shadow); }
-.issue-delete-action { display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 9px 12px; border: 0; border-radius: 4px; background: transparent;
+.issue-delete-action { display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 4px 6px; border: 0; border-radius: 6px; background: transparent;
   color: var(--red); text-align: left; cursor: pointer; }
 .issue-delete-action:hover, .issue-delete-action:focus-visible { background: var(--redSoft); }
 .issue-delete-action svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
   stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.delete-issue-confirm .danger-button { padding: 8px 16px; background: var(--red); color: white;
-  border: 1px solid var(--red); border-radius: 6px; cursor: pointer; }
-.danger-button:disabled { opacity: .6; cursor: wait; }
-.delete-issue-confirm p { margin: 0 0 12px; line-height: 1.6; color: var(--muted); }
-.delete-issue-confirm .delete-issue-title { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
-.delete-issue-confirm .delete-error { color: var(--red); }
-@media (hover: none) { .issue-card .issue-menu-button { opacity: 1; } }
-.modal[role="alertdialog"] { width: min(620px, calc(100vw - 48px)); min-width: 0; }
+#modal-backdrop.delete-confirm-backdrop { background: rgb(0 0 0 / .1);
+  animation: delete-backdrop-enter 100ms ease; }
+.modal.delete-confirm-modal { width: min(384px, calc(100vw - 32px)); min-width: 0;
+  border-radius: 12px; box-shadow: var(--shadow); animation: delete-confirm-enter 100ms ease; }
+.delete-confirm-header { padding: 16px; }
+.delete-confirm-header h2 { margin: 0 0 6px; font-size: 16px; font-weight: 500; line-height: 24px; }
+.delete-confirm-header p { margin: 0; color: var(--muted); font-size: 14px; line-height: 20px; }
+.delete-confirm-header .delete-error { margin-top: 12px; color: var(--red); overflow-wrap: anywhere; }
+.delete-confirm-footer { display: flex; justify-content: flex-end; gap: 8px;
+  margin: 16px -16px -16px; padding: 16px; border-top: 1px solid var(--line);
+  border-radius: 0 0 12px 12px; background: var(--surface2); }
+.delete-confirm-footer button { height: 32px; min-height: 32px; padding: 0 10px;
+  border-radius: 8px; font-size: 14px; font-weight: 500; }
+.delete-confirm-footer .secondary-button { background: var(--surface); }
+.delete-confirm-footer .danger-button { background: var(--red); color: white; border: 1px solid var(--red); }
+.delete-confirm-footer .danger-button:hover { filter: brightness(.9); }
+.delete-confirm-footer button:disabled { opacity: .6; cursor: wait; }
+@keyframes delete-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes delete-confirm-enter { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: scale(1); } }
+@media (max-width: 639px) {
+  .modal.delete-confirm-modal { width: min(320px, calc(100vw - 32px)); }
+  .delete-confirm-header h2, .delete-confirm-header #delete-description { text-align: center; }
+  .delete-confirm-footer { flex-direction: column-reverse; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .delete-confirm-backdrop, .modal.delete-confirm-modal { animation: none; }
+}

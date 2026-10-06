@@ -21,17 +21,22 @@ function capabilitiesFor(runtimeId) {
 }
 
 let modalReturnFocus;
-function modal(title, subtitle, body, wide = false) {
+function modal(title, subtitle, body, wide = false, confirmation = false) {
   delete $("#modal-content").dataset.deleting;
   $(".modal").setAttribute("role", "dialog");
   $(".modal").removeAttribute("aria-describedby");
   modalReturnFocus = document.activeElement;
   $(".modal").classList.toggle("task-create-modal", title === "新建任务");
   $(".modal").classList.toggle("wide", wide);
+  $(".modal").classList.toggle("delete-confirm-modal", confirmation);
+  $("#modal-backdrop").classList.toggle("delete-confirm-backdrop", confirmation);
+  $("#modal-backdrop").dataset.confirmation = confirmation ? "1" : "";
   $("#modal-content").innerHTML =
-    `<header class="modal-header"><div><h2 id="modal-title">${title}</h2>${subtitle ? `<p>${subtitle}</p>` : ""}</div><button class="icon-button" data-close-modal>×</button></header><div class="modal-body">${body}</div>`;
+    confirmation
+      ? `<div class="delete-confirm-header"><h2 id="modal-title">${title}</h2>${body}</div>`
+      : `<header class="modal-header"><div><h2 id="modal-title">${title}</h2>${subtitle ? `<p>${subtitle}</p>` : ""}</div><button class="icon-button" data-close-modal>×</button></header><div class="modal-body">${body}</div>`;
   $("#modal-backdrop").hidden = false;
-  $("[data-close-modal]").onclick = closeModal;
+  if (!confirmation) $("[data-close-modal]").onclick = closeModal;
   $$(".field", $("#modal-content")).forEach((field, i) => {
     const label = $("label", field),
       input = $("input,textarea,select", field);
@@ -511,13 +516,11 @@ export function showAgentForm(agent = null) {
 export function showDeleteIssue(issue) {
   const active = state.tasks.some((task) => task.issue_id === issue.id &&
     ["queued", "dispatched", "running", "waiting_input"].includes(task.status));
-  modal("删除任务？", "", `<div class="delete-issue-confirm">
-    <p class="delete-issue-title">${esc(issue.title)}</p>
-    <div id="delete-description"><p>将永久删除该任务及其讨论、执行记录和结果。此操作不可撤销。</p>
-    <p>代码分支和 Worktree 将保留。</p>${active ? "<p>关联的 Agent 执行将被取消。</p>" : ""}</div>
+  modal("删除任务", "", `
+    <p id="delete-description">将永久删除该任务及其讨论和执行记录。此操作不可撤销。${active ? "关联的 Agent 执行将被取消。" : ""}</p>
     <p id="delete-error" class="delete-error" role="alert" hidden></p>
-    <div class="modal-actions"><button class="secondary-button" id="cancel-delete">取消</button>
-    <button class="danger-button" id="confirm-delete">删除</button></div></div>`);
+    <div class="delete-confirm-footer"><button class="secondary-button" id="cancel-delete">取消</button>
+    <button class="danger-button" id="confirm-delete">删除</button></div>`, false, true);
   $(".modal").setAttribute("role", "alertdialog");
   $(".modal").setAttribute("aria-describedby", "delete-description");
   $("#cancel-delete").onclick = closeModal;
@@ -526,6 +529,7 @@ export function showDeleteIssue(issue) {
     const content = $("#modal-content");
     if (content.dataset.deleting) return;
     content.dataset.deleting = "1";
+    $("#confirm-delete").setAttribute("aria-busy", "true");
     $("#delete-error").hidden = true;
     const buttons = $$("button", content);
     buttons.forEach((button) => button.disabled = true);
@@ -534,6 +538,7 @@ export function showDeleteIssue(issue) {
       await api(`/api/issues/${encodeURIComponent(issue.id)}`, { method: "DELETE" });
     } catch (error) {
       delete content.dataset.deleting;
+      $("#confirm-delete").removeAttribute("aria-busy");
       buttons.forEach((button) => button.disabled = false);
       $("#confirm-delete").textContent = "删除";
       $("#delete-error").textContent = error.message;
