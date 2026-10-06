@@ -585,10 +585,10 @@ Mica 当前只读 `parent_id`/`root_id`，完全未使用 `thread_id`。
 
 ## KI-009：租约恢复与 queued 唯一索引冲突，已有后续任务时无法恢复过期执行
 
-- **状态**：待设计（已在 PostgreSQL 复现）
+- **状态**：待设计（已在 PostgreSQL 复现；2026-10-06 核对 Multica 方案并补充设计方向）
 - **优先级**：P1
 - **发现日期**：2026-10-02
-- **涉及模块**：PostgreSQL Task Repository、Daemon 恢复、评论合并；关联 KI-003
+- **涉及模块**：PostgreSQL Task Repository、Daemon 恢复、评论合并、任务优先级；关联 KI-003
 
 ### 当前行为与复现
 
@@ -612,12 +612,35 @@ Mica 当前只读 `parent_id`/`root_id`，完全未使用 `thread_id`。
 - `Daemon.run_once()` 在领取新任务之前执行恢复，因此该冲突也可能阻断本 Runtime 的正常领取；异常返回 `True` 后，Worker 可能持续重试并反复输出错误日志。
 - 内存仓储未实现这个唯一约束，现有内存恢复测试无法发现 PostgreSQL 的冲突。
 
+### Multica 参照（本机源码，HEAD 2ea01ae，2026-10-06 核对）
+
+Multica 用"旧行终态化 + 新子行重试"取代"旧行改回 queued"，并用优先级保证恢复轮次先于新输入执行：
+
+1. **终态化 + 同事务子行**：租约过期/Runtime 失联的任务由 sweeper 判 `failed`（`failure_reason` 分类：`queued_expired`/`runtime_offline`/`timeout`/`runtime_recovery`），终态不在唯一索引内，槽位自然释放。重试是新子行（`CreateRetryTask`），与 fail 同一事务创建（MUL-4351），关闭"旧行已死、重试未出现"的插队窗口。子行经 `parent_task_id` 记录血缘，继承 trigger/coalesced 评论、squad 血缘与 `attempt+1`；`delivered_comment_ids` 刻意清空，领取时重新固化自己的输入快照。
+2. **撞索引让位而非报错**：`CreateRetryTask` 用 `ON CONFLICT DO NOTHING`——槽位已被 queued 后继占据时不报错、不创建，调用方视为正常结果（策略：谁在槽位谁优先，人工 rerun 赢过自动重试）。需要退避的重试先放 `deferred` 状态（刻意排除在索引外，可与 queued 共存），由 `PromoteDueDeferredTasksForRuntime` 提升：槽位被占则跳过、每 `(issue, agent, thread)` 分区 `row_number()` 最多提升一行（MUL-4257；其注释证实曾发生"一条冲突阻断整个 Runtime 领取"的同类事故）。跳过的行保持 deferred 等下一 tick，不丢任务。
+3. **防重复子行**：`parent_task_id` 上只有普通索引，没有唯一约束。"一个父任务最多一个子任务"靠状态流转一次性（标失败的 UPDATE 带状态谓词，只赢一次）+ 事务原子性保证；另有 `HasRetryTaskForParent` 检查与 `CancelSupersededDeferredRetries` 定期清理兜底。重试次数按失败原因分级设上限（`retryAttemptCeiling`）。
+4. **优先级体系**：`agent_task_queue.priority INT NOT NULL DEFAULT 0`，无专门索引。赋值：Issue 任务映射业务优先级 urgent=4/high=3/medium=2/low=1/none=0；Chat 固定 2；Autopilot 固定 0；**Chat 重试子任务 `GREATEST(父, 3)`**——动机是用户在失败轮次运行期间发的新消息会排成 priority 2 的新任务，不提级则同级按 `created_at` 让新输入先跑，旧轮次的上下文顺序颠倒。消费点：领取 `ORDER BY priority DESC, created_at ASC`；deferred 提升与 reclaim 同序。无优先级变更传播；评论合并（coalesce）不改动已有排队任务的优先级。
+5. **Sweeper 工程化**：`FOR UPDATE SKIP LOCKED` 选 victim + UPDATE 时复查谓词 + 每 tick `LIMIT` 上限，单条冲突不拖垮整批。
+
+**不能照抄的一点**：Multica 让位安全，是因为 chat 重试链经 `chat_input_task_id` 继承读同一批根输入；Mica 的 queued successor 只携带新评论，过期任务已消费的 `delivered_comment_ids` 不在其中。重试让位时必须把原输入并入 successor 的合并集合，否则首轮输入丢失。
+
 ### 期望方向与待决策项
 
+按 Multica 方案对齐（2026-10-06 评估，暂未实现）：
+
+- 恢复不再 UPDATE 旧行为 queued；改为逐行事务：旧行 `failed`（带状态谓词只赢一次）+ INSERT 重试子行（血缘列、`attempt+1`、继承输入快照），`ON CONFLICT DO NOTHING` 让位；**让位时把原 delivered 输入并入已有 successor**。
+- 引入任务优先级，先只做内部排序键、不做用户可见功能（YAGNI）：`agent_task` 加 `priority INT NOT NULL DEFAULT 0`；普通任务 0、恢复重试 1；`claim_next` 改 `ORDER BY priority DESC, created_at`；`enqueue_or_merge` 的 `DO UPDATE` 不动 priority（合并不改变已有排队的紧迫度）；内存仓储排序同步保持一致。改动评估：migration 约 10 行，任务创建已收口在 `TaskService.enqueue()` 一处，赋值只改一处；存量数据 priority=0 时排序行为与现状完全等价。
+- 恢复重试设次数上限，避免无限复活。
 - 明确“恢复旧执行”和“执行后续输入”的优先级，保证恢复路径与 queued 唯一约束兼容。
-- 可评估独立的恢复状态，或事务内协调原 Task 与 successor；不能仅删除唯一索引，也不能直接覆盖、丢弃后续评论。
 - 保留原 Task 的执行快照、结果历史与 attempt 防护，明确取消标记在恢复时的语义。
 - 单个任务恢复失败不应无限阻断无关任务的调度。
+
+待决策项：
+
+1. 优先级做内部排序键（建议，两档起步）还是用户可见功能（需要 Issue 加业务优先级字段，外延大）。
+2. 重试让位时原输入并入 successor 的具体方式与去重规则。
+3. 恢复重试次数上限与失败原因分类粒度。
+4. 是否需要 `deferred` 缓办状态（可先不做，直接 ON CONFLICT 让位 + 优先级）。
 
 ### 验收条件
 
@@ -625,6 +648,8 @@ Mica 当前只读 `parent_id`/`root_id`，完全未使用 `thread_id`。
 - 同一 Issue/Agent 仍不并发执行两个 Task。
 - 旧 Worker 的晚到结果不能覆盖恢复后的执行。
 - 一个冲突任务不会导致同 Runtime 所有任务持续停止领取。
+- 恢复重试排在同 Issue/Agent 新输入之前被领取；不同 Issue/Agent 之间高优先级先领取、同优先级保持 FIFO。
+- 评论合并不改变已有排队任务的优先级；内存与 PostgreSQL 仓储的领取排序行为一致。
 - 内存与 PostgreSQL 仓储在该场景下的可观察行为一致。
 
 ---
