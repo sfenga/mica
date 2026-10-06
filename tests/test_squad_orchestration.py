@@ -1,4 +1,8 @@
 import json
+import sys
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +12,8 @@ from mica.application import IngressCommand
 from mica.application.services import NotFoundError
 from mica.bootstrap import build_memory_container
 from mica.domain import Agent, AssigneeType, IssueStatus, TaskStatus
-from mica.runtime.providers import ProviderRunResult
+from mica.runtime import WorkspaceManager
+from mica.runtime.providers import CliProvider, ProviderRunResult
 
 
 class SquadProvider:
@@ -318,3 +323,37 @@ def test_feishu_only_receives_squad_level_completion_not_internal_task_completio
     message_types = [message.message_type for message in container.channels.list_outbox()]
 
     assert message_types == ["issue.accepted", "squad.completed"]
+
+
+def test_squad_member_prompt_carries_ctx_channel():
+    fixture = Path(__file__).parent / "fixtures" / "fake_ctx_probe_cli.py"
+    container, _, squad = build_squad_container()
+    container.providers.register(
+        "claude",
+        CliProvider(
+            "claude",
+            command_prefix=[sys.executable, str(fixture), "probe"],
+            timeout_seconds=60,
+        ),
+    )
+    for agent_id in ("geometry", "placement"):
+        container.agents.add(replace(container.agents.get(agent_id), provider="claude"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        container.daemon.workspaces = WorkspaceManager(tmp)
+        issue = container.trigger_service.create_issue(
+            title="Generate a valid layout",
+            body="Use the product catalog and room geometry.",
+            workspace_id="demo",
+            assignee_type=AssigneeType.SQUAD,
+            assignee_id=squad.id,
+        )
+        assert container.daemon.run_once()  # leader delegates
+        assert container.daemon.run_once()  # first member runs the probe
+
+    member_tasks = [task for task in container.tasks.list(issue.id) if not task.is_leader_task]
+    assert member_tasks[0].status == TaskStatus.COMPLETED
+    findings = json.loads(member_tasks[0].output)
+    assert "Delegated instruction" in findings["prompt"]
+    assert "mica-ctx comments" in findings["prompt"]
+    assert findings["issue_id"] == issue.id

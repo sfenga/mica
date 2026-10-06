@@ -33,6 +33,7 @@ dev = [
 [project.scripts]
 mica = "mica.main:main"
 mica-daemon = "mica.daemon_main:main"
+mica-ctx = "mica.ctx:main"
 
 [tool.setuptools.packages.find]
 include = ["mica*"]

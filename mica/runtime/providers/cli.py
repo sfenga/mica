@@ -16,6 +16,7 @@ from .base import (
     CancellationCheck,
     ProviderCancelled,
     ProviderRunResult,
+    build_child_env,
     build_task_prompt,
 )
 
@@ -201,7 +202,7 @@ class CliProvider:
     ) -> ProviderRunResult:
         if not workdir:
             raise RuntimeError(f"{self.flavor} tasks require a working directory")
-        prompt = self._prompt(agent, issue, task)
+        prompt = self._prompt(agent, issue, task, resumed=bool(resume_session_id))
         command = self._command(agent, prompt, resume_session_id)
         if (
             self.flavor == "claude"
@@ -218,6 +219,7 @@ class CliProvider:
             process = subprocess.Popen(
                 command,
                 cwd=workdir,
+                env=build_child_env(issue, task),
                 stdin=subprocess.PIPE if self.flavor == "claude" else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -434,7 +436,7 @@ class CliProvider:
                 if model:
                     command.extend(["--model", str(model)])
                 command.append(prompt)
-            return command
+            return self._with_codex_network(command)
         command = [
             executable,
             "--print",
@@ -457,8 +459,23 @@ class CliProvider:
         return command
 
     @staticmethod
-    def _prompt(agent: Agent, issue: Issue, task: Task) -> str:
-        return build_task_prompt(issue, task)
+    def _with_codex_network(command: List[str]) -> List[str]:
+        # codex's workspace-write sandbox blocks all network access (loopback
+        # included), which would cut the agent off from the mica-ctx read
+        # channel. Re-enable network inside the sandbox so agents can pull
+        # issue context from the local API. The -c override is an `exec`
+        # option, so it must come before the `resume` subcommand token.
+        index = command.index("exec") + 1
+        return [
+            *command[:index],
+            "-c",
+            "sandbox_workspace_write.network_access=true",
+            *command[index:],
+        ]
+
+    @staticmethod
+    def _prompt(agent: Agent, issue: Issue, task: Task, resumed: bool = False) -> str:
+        return build_task_prompt(issue, task, resumed=resumed, ctx_channel=True)
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:

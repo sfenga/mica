@@ -243,9 +243,11 @@ Leader 再委派 Placement Agent：
 生成两个候选摆放方案。
 ```
 
-当前 `squad.delegated` Task 的 Prompt 只包含正文和 handoff。如果 Leader 没有复述新增约束，Placement Agent 就可能不知道消防通道和产品限制。
+~~当前 `squad.delegated` Task 的 Prompt 只包含正文和 handoff。~~（2026-10-05 更新）CLI Provider 的成员任务 Prompt 现在带有 `mica-ctx` 读取指令，Worker 可以自行扫描并展开 Issue 的完整评论，不再只依赖 Leader 复述；但前提是 Worker 主动去读，平台仍不保证它读了，且 ACP/A2A Provider 尚未接入该通道。
 
-这不是模型能力问题，而是平台没有为 Worker 提供完整或可查询的 Issue 公共上下文。
+如果 Leader 没有复述新增约束，Placement Agent 就可能不知道消防通道和产品限制。
+
+这不是模型能力问题，而是平台没有为 Worker 提供完整或可查询的 Issue 公共上下文——CLI 侧已补可查询通道，其余 Provider 和"确保读到"仍未解决。
 
 ### 5.2 Worker 之间不能可靠引用结果
 
@@ -385,6 +387,10 @@ get_artifact(artifact_id)
 
 这一步解决“Worker 看不到用户先前评论”的核心缺口。
 
+> **2026-10-05 进展**：CLI Provider 已落地该阶段的简化版——Daemon 为 Agent 子进程注入 `MICA_API_URL`/`MICA_ISSUE_ID`/`MICA_TASK_ID` 环境变量并把包内 `mica-ctx` 入口前置进 PATH，Agent 可用 `mica-ctx comments` / `mica-ctx comment <id>` 按需读取 Issue 评论；Prompt 按冷/热恢复分两档给出读取指令（`build_task_prompt(..., resumed=..., ctx_channel=True)`，覆盖评论触发、委派 handoff 和普通首任务三个分支）。输入语义为两层：触发评论仍在领取时经 `delivered_comment_ids` 冻结，周边上下文由 Agent 按读取时刻 live 拉取、不冻结。
+>
+> 该阶段的残留项：ACP Provider 的同构扩展（注入点相同，待做）、A2A 远程 Agent 的平台侧装配、按恢复状态区分的服务端增量提示（需 `started_at` 迁移与领取时增量计算，已评估未做）、`MICA_TASK_TOKEN` 的真实签发与校验（当前仅占位透传）。
+
 ### 阶段二：引入结构化 TaskResult 与 Artifact
 
 将 `Task.output` 从唯一结果载体升级为：
@@ -517,15 +523,15 @@ Leader 根据持久化结果继续委派或汇总
 
 ## 10. 当前实现边界
 
-- Mica 目前没有面向所有 Provider 的 Issue/Comment/Artifact 读取工具。
-- Squad Worker 不会自动读取完整 Issue 评论历史。
-- 跨 Agent 结果主要依赖 Leader briefing 和 handoff 文本。
-- Leader briefing 对最近结果有数量和字符截断，不适合作为完整事实源。
+- 本地 CLI Agent（Codex/Claude）已有任务级只读通道 `mica-ctx`，可按需读取本 Issue 的评论；ACP 与 A2A Agent 暂无该通道。
+- 通道是"可达"而非"必读"：Agent 是否实际读取取决于模型行为，平台不保存读取回执；拉取内容为读取时刻的现场，不属于领取时冻结的输入快照。
+- 跨 Agent 文件本体仍不可交接：无项目任务的工作目录按 `(issue, agent)` 隔离，产物文件只能经文字评论转述；Artifact 登记与复制未实现。
+- Leader briefing 对最近结果有数量和字符截断，不适合作为完整事实源（Leader 现可经 `mica-ctx` 展开全文缓解）。
 - 尚未实现 `TaskResult`、通用 Artifact、`context_inputs` 和 `context_manifest`。
 - Session 作用域尚未区分 direct、leader、worker 和 squad role。
 - 当前没有自动摘要、上下文预算器和 schema version。
 
-因此现在可以说项目已经实现“同一 Agent 的会话续接”和“Task 级输入快照”，但不能说已经实现完整的多 Agent 共享记忆或 Context Engineering 平台。
+因此现在可以说项目已经实现"同一 Agent 的会话续接"、"Task 级触发输入快照"，以及"本地 CLI Agent 的 Issue 公共上下文按需读取"；但不能说已经实现完整的多 Agent 共享记忆、文件级交接或 Context Engineering 平台。
 
 ## 11. 面试时的 90 秒讲法
 
@@ -537,6 +543,6 @@ Leader 根据持久化结果继续委派或汇总
 
 > **多 Agent 上下文管理**：针对同一 Issue 由多个异构 Agent 分阶段处理、Provider Session 无法跨 Agent 共享的问题，将上下文拆分为持久化的 Issue 公共事实、Agent 私有会话与 Task 输入快照；通过评论线程、结构化 TaskResult、Artifact 引用和上下文版本完成跨 Agent 交接，使 Session 丢失后仍可恢复执行，并通过按需读取与预算控制降低长任务的上下文膨胀。
 
-在当前代码尚未补齐共享读取和 Artifact 前，更准确的表述是：
+在当前代码尚未补齐 Artifact 与跨 Provider 读取前，更准确的表述是：
 
-> **Agent 上下文续接**：按 Issue 与 Agent 隔离并复用 Provider Session、代码分支和工作目录，在 Task 领取时固化本轮评论输入；Squad 通过成员委派指令和终态结果向 Leader 回传上下文，为后续引入可查询的 Issue 公共上下文与结构化 Artifact 交接建立执行基础。
+> **Agent 上下文续接与按需读取**：按 Issue 与 Agent 隔离并复用 Provider Session、代码分支和工作目录，在 Task 领取时固化本轮评论输入；为本地 CLI Agent 提供任务级只读上下文通道（`mica-ctx`），使其按需扫描并展开 Issue 评论与历史结果；Squad 通过成员委派指令和终态结果向 Leader 回传上下文，为后续引入结构化 Artifact 交接与上下文版本建立执行基础。
