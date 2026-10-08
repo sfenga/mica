@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from mica.domain import Agent, Issue, Task
 
@@ -22,6 +22,7 @@ class StubProvider:
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult:
         if is_cancelled is not None and is_cancelled():
             raise ProviderCancelled("task cancelled")

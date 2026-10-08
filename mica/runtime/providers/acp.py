@@ -169,6 +169,7 @@ class AcpProvider:
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult:
         if not workdir or not Path(workdir).is_absolute():
             raise RuntimeError("ACP tasks require an absolute working directory")
@@ -242,7 +243,7 @@ class AcpProvider:
                 session_id = created.get("sessionId")
                 if not session_id:
                     raise RuntimeError("ACP session/new response is missing sessionId")
-            prompt = self._prompt(agent, issue, task)
+            prompt = self._prompt(agent, issue, task, replay_conflicts=replay_conflicts)
             result = rpc.request(
                 "session/prompt",
                 {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
@@ -267,8 +268,13 @@ class AcpProvider:
         return servers
 
     @staticmethod
-    def _prompt(agent: Agent, issue: Issue, task: Task) -> str:
-        body = build_task_prompt(issue, task)
+    def _prompt(
+        agent: Agent,
+        issue: Issue,
+        task: Task,
+        replay_conflicts: Optional[List[str]] = None,
+    ) -> str:
+        body = build_task_prompt(issue, task, replay_conflicts=replay_conflicts)
         return f"{agent.instructions}\n\n{body}".strip() if agent.instructions else body
 
     @staticmethod

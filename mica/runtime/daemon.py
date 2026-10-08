@@ -120,6 +120,7 @@ class Daemon:
         if not self.slots.acquire(self.runtime_id):
             return False
         task = None
+        prepared = None
         heartbeat_stop = Event()
         lease_lost = Event()
         heartbeat_thread = None
@@ -152,22 +153,27 @@ class Daemon:
             previous = self.tasks.previous_execution(task)
             prior_session_id = previous.session_id if previous is not None else None
             branch_name = previous.branch_name if previous is not None else None
-            worktree_path = previous.worktree_path if previous is not None else None
+            previous_tip = previous.recorded_tip if previous is not None else None
             workdir = None
+            worktree_path = None
             in_place_path = None
+            prepared = None
             if issue.project_path:
                 execution_mode = issue.project_execution_mode or "worktree"
                 if execution_mode == "worktree":
                     if self.worktrees is None:
                         raise RuntimeError("worktree manager is not configured")
-                    branch_name, worktree_path = self.worktrees.prepare(
+                    prepared = self.worktrees.prepare(
                         issue.project_path,
                         issue.id,
                         agent.id,
+                        task.id,
                         branch_name,
-                        worktree_path,
+                        previous_tip,
                     )
-                    workdir = worktree_path
+                    branch_name = prepared.branch
+                    worktree_path = prepared.workdir
+                    workdir = prepared.workdir
                 elif execution_mode == "in_place":
                     branch_name = None
                     worktree_path = None
@@ -195,6 +201,9 @@ class Daemon:
                 task.attempt,
             )
             if self.tasks.is_cancel_requested(task.id):
+                if prepared is not None:
+                    self.worktrees.release(prepared)
+                    prepared = None
                 self._cancel_task(task)
                 return True
             self.tasks.start(task.id, self.worker_id, task.attempt)
@@ -226,7 +235,18 @@ class Daemon:
                 workdir=workdir,
                 resume_session_id=prior_session_id,
                 is_cancelled=cancellation_check,
+                replay_conflicts=prepared.replay_conflicts if prepared is not None else None,
             )
+            delivery = None
+            if prepared is not None:
+                # Finalize before any terminal writeback: the branch must
+                # carry this turn's work before the task reports an outcome.
+                delivery = self.worktrees.finalize(prepared)
+                if delivery.branch:
+                    self.tasks.record_delivery(
+                        task.id, delivery.branch, delivery.tip, self.worker_id, task.attempt
+                    )
+                prepared = None
             if self.tasks.is_cancel_requested(task.id):
                 self._cancel_task(task)
             elif result.requires_input:
@@ -241,20 +261,32 @@ class Daemon:
                 if task.squad_id and not task.is_leader_task and self.squads is not None:
                     self.squads.handle_worker_terminal(task)
             else:
+                output = result.output
+                if delivery is not None and delivery.branch:
+                    # The branch reference is what lets a later agent review
+                    # this turn's code: git diff HEAD...<branch> works from any
+                    # worktree of the same repository.
+                    output = (output or "") + (
+                        f"\n\n---\n交付分支 `{delivery.branch}`（tip `{delivery.tip[:12]}`）。"
+                        f"可用 `git diff HEAD...{delivery.branch}` 审核本轮改动。"
+                    )
                 if task.squad_id and self.squads is not None:
                     self.squads.complete_task(
-                        task, result.output, result.session_id, self.worker_id, task.attempt
+                        task, output, result.session_id, self.worker_id, task.attempt
                     )
                 else:
                     self.tasks.complete(
                         task.id,
-                        result.output,
+                        output,
                         result.session_id,
                         self.worker_id,
                         task.attempt,
                     )
             return True
         except ProviderCancelled:
+            if prepared is not None:
+                self.worktrees.release(prepared)
+                prepared = None
             if task is not None:
                 if self.tasks.is_cancel_requested(task.id):
                     try:
@@ -270,6 +302,9 @@ class Daemon:
             # Deletion raced with setup, a provider event, or its final callback.
             return True
         except Exception as exc:
+            if prepared is not None:
+                self.worktrees.release(prepared)
+                prepared = None
             logging.getLogger(__name__).exception(
                 "task execution failed",
                 extra={"task_id": getattr(task, "id", None), "worker_id": self.worker_id},
@@ -303,6 +338,24 @@ class Daemon:
             if self.tasks.tasks.get(task_id) is not None:
                 raise
             raise ProviderCancelled("task deleted") from None
+
+    def sweep_environments(self) -> None:
+        """Reclaim env roots left behind by terminal or deleted tasks."""
+        if self.worktrees is None:
+            return
+        active_statuses = {TaskStatus.QUEUED, TaskStatus.DISPATCHED, TaskStatus.RUNNING}
+
+        def is_task_active(task_id: str) -> bool:
+            if not task_id:
+                return False
+            try:
+                task = self.tasks.tasks.get(task_id)
+            except Exception:
+                logging.getLogger(__name__).exception("sweep: task lookup failed")
+                return True  # unknown state: keep the directory rather than guess
+            return task is not None and task.status in active_statuses
+
+        self.worktrees.sweep(is_task_active)
 
     def _cancel_task(self, task) -> None:
         worker_role = bool(task.squad_id and not task.is_leader_task)
@@ -353,6 +406,10 @@ class DaemonWorker:
             return
         self._stop.clear()
         self.daemon.resume()
+        try:
+            self.daemon.sweep_environments()
+        except Exception:
+            logging.getLogger(__name__).exception("environment sweep failed")
         self._thread = Thread(target=self._run, name=f"mica-{self.daemon.worker_id}", daemon=True)
         self._thread.start()
 

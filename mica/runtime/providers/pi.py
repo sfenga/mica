@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from mica.domain import Agent, Issue, Task
@@ -38,6 +38,7 @@ class PiProvider:
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult:
         if not workdir:
             raise RuntimeError("pi tasks require a working directory")
@@ -59,7 +60,7 @@ class PiProvider:
             bufsize=1,
             start_new_session=os.name != "nt",
         )
-        prompt = self._prompt(issue, task)
+        prompt = self._prompt(issue, task, replay_conflicts=replay_conflicts)
         assert process.stdin is not None
         process.stdin.write(prompt)
         process.stdin.close()
@@ -127,8 +128,10 @@ class PiProvider:
         return ProviderRunResult(output=result, session_id=session_path)
 
     @staticmethod
-    def _prompt(issue: Issue, task: Task) -> str:
-        return build_task_prompt(issue, task)
+    def _prompt(
+        issue: Issue, task: Task, replay_conflicts: Optional[List[str]] = None
+    ) -> str:
+        return build_task_prompt(issue, task, replay_conflicts=replay_conflicts)
 
     @staticmethod
     def _new_session_path() -> str:

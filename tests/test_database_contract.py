@@ -48,6 +48,14 @@ OUTBOX_FAILURE_MIGRATION = (
     / "sql"
     / "005_outbox_failure.up.sql"
 )
+WORKTREE_DELIVERY_MIGRATION = (
+    Path(__file__).parents[1]
+    / "mica"
+    / "infrastructure"
+    / "database"
+    / "sql"
+    / "010_worktree_delivery.up.sql"
+)
 
 
 class DatabaseContractTest(unittest.TestCase):
@@ -106,6 +114,11 @@ class DatabaseContractTest(unittest.TestCase):
     def test_outbox_has_terminal_failure_state(self):
         migration = OUTBOX_FAILURE_MIGRATION.read_text(encoding="utf-8")
         self.assertIn("'failed'", migration)
+
+    def test_worktree_delivery_migration_records_branch_tip(self):
+        migration = WORKTREE_DELIVERY_MIGRATION.read_text(encoding="utf-8")
+        self.assertIn("recorded_tip", migration)
+        self.assertIn("agent_task", migration)
 
     def test_stale_attempt_cannot_finish_reclaimed_task(self):
         container = build_memory_container()

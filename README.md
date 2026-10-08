@@ -42,6 +42,16 @@ python -m pytest -q
 
 正式 Daemon 默认使用 Codex，也可以通过 `MICA_DEFAULT_PROVIDER=claude` 切换到 Claude Code；对应 CLI 需要已安装并登录。自动化测试使用 Stub 或伪 CLI，不会调用真实模型。
 
+### 代码任务的 Worktree 交付
+
+关联 Git 项目的 Issue 默认以 `worktree` 模式执行（项目也可显式选择 `in_place` 直接操作当前目录）。每个任务在 Daemon 管理的目录里获得一份一次性 Worktree 副本，执行结束后副本即回收；**唯一持久成果是落在用户仓库里的分支** `mica/<issue>/<agent>`：
+
+- 用户目录里的未提交修改会作为快照注入副本（上限 2000 个文件 / 200MiB，gitignore 内容自动排除），Agent 看到的就是用户眼前的代码状态；用户自己的目录全程不被写入。
+- 同一 Issue/Agent 的追问续接同一分支与 CLI 会话（副本新建、会话可跨目录 resume）；用户把分支合入主干后，下一轮自动从最新 HEAD 重新出发。
+- 任务结束时残留改动自动提交进分支，结果评论附上分支名与 tip commit；其他 Agent 或用户可用 `git diff HEAD...<branch>` 直接审核本轮改动，无需检出。
+- 两轮之间用户改了 Agent 改过的文件会产生真实合并冲突：冲突文件列表写进下一轮 prompt，Agent 未解决前平台拒绝交付并保留现场。
+- 只读任务不留分支；取消/失败的副本保留现场，Daemon 启动时统一清理；分支归属以数据库 checkpoint（`recorded_tip`）为准，删除重建的同名分支不会被误续接。
+
 ### Web 与飞书入口
 
 正式 Web 控制台位于 `http://127.0.0.1:8000/app`。Web 与飞书消息都会进入同一个 `IngressService`：外部事件先按渠道、租户和事件 ID 去重，再完成用户身份映射，并在同一事务中创建 Issue、首个 Task 与回复 Outbox。Web 可通过 `Idempotency-Key` 防止重复提交；任务详情支持追问某条执行记录对应的 Agent，也可使用 `@agent:ID` 或 `@squad:ID` 显式路由。

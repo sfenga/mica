@@ -122,6 +122,17 @@ path:   <worktree-root>/<repo-hash>/<issue-agent>
 
 这一实现比 Multica 更保守。Multica 有更完整的仓库缓存与任务分支管理，并允许会话继续使用既有 Worktree；它不会用“源仓库必须全局干净”作为所有场景的统一前提。Mica 当前采用稳定的 `(Issue, Agent)` 分支并拒绝脏源仓库，是为了先把“看见哪份代码”讲清楚，代价是不能直接带入用户尚未提交的本地改动。
 
+### 模型更新（2026-10-08）：一次性副本 + 分支交付
+
+本节上文（以及第 9 节“当前边界”、第 10 节“90 秒讲法”中“复用 Worktree 分支”的口径）描述的是对齐 Multica 之前的版本。2026-10-08 起，worktree 模式对齐 Multica 的“每任务一次性副本 + 分支作为唯一持久成果”：
+
+- 副本路径改为 `<worktree-root>/<repo-hash>/<task-id>/worktree`，随任务创建、收尾即回收；持久的只有用户仓库里的 `mica/<issue>/<agent>` 分支。分支命名不变，命名口径仍按 `(Issue, Agent)`。
+- 不再要求源仓库干净：用户目录的未提交修改通过私有 `GIT_INDEX_FILE` 打成快照 commit，重放进副本（2000 文件 / 200MiB 上限）；用户自己的目录全程不被写入。第 9 节“要求源仓库无未提交修改”一条随之作废。
+- 追问续接的是分支与 CLI 会话，不是目录：每轮新建副本，从分支 tip（或分支已合入主干时的最新 HEAD）出发；Claude 会话跨目录 resume 已实测可行。
+- 分支归属以数据库 checkpoint（`agent_task.recorded_tip`）为准，隐藏 ref `refs/mica/local-state/<branch>` 只做快照对象的 gc 锚点；无 checkpoint 的同名分支一律冻结另开。
+- 收尾自动提交残留改动、回收副本，结果评论附分支名与 tip；冲突重放未解决时拒绝交付并保留现场（`worktree-preserved`），Daemon 启动时 sweep 清理终结任务的残留目录。
+- 新边界：依赖不跨轮保留（每轮副本重装）；finalize 提交与任务状态回写之间有崩溃窗口，靠分支续接兜底（at-least-once 语义不变）。
+
 ## 6. in_place 为什么需要串行
 
 `in_place` 允许只读任务或用户明确希望直接修改当前目录的任务避免创建 Worktree。但两个 Agent 同时写同一个目录会互相覆盖，甚至一个任务执行测试时读到另一个任务尚未完成的修改。

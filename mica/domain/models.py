@@ -68,6 +68,7 @@ class Task:
     prior_session_id: Optional[str] = None
     branch_name: Optional[str] = None
     worktree_path: Optional[str] = None
+    recorded_tip: Optional[str] = None
     attempt: int = 0
     cancel_requested: bool = False
     output: Optional[str] = None

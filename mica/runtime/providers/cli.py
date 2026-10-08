@@ -199,10 +199,13 @@ class CliProvider:
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult:
         if not workdir:
             raise RuntimeError(f"{self.flavor} tasks require a working directory")
-        prompt = self._prompt(agent, issue, task, resumed=bool(resume_session_id))
+        prompt = self._prompt(
+            agent, issue, task, resumed=bool(resume_session_id), replay_conflicts=replay_conflicts
+        )
         command = self._command(agent, prompt, resume_session_id)
         if (
             self.flavor == "claude"
@@ -474,8 +477,16 @@ class CliProvider:
         ]
 
     @staticmethod
-    def _prompt(agent: Agent, issue: Issue, task: Task, resumed: bool = False) -> str:
-        return build_task_prompt(issue, task, resumed=resumed, ctx_channel=True)
+    def _prompt(
+        agent: Agent,
+        issue: Issue,
+        task: Task,
+        resumed: bool = False,
+        replay_conflicts: Optional[List[str]] = None,
+    ) -> str:
+        return build_task_prompt(
+            issue, task, resumed=resumed, ctx_channel=True, replay_conflicts=replay_conflicts
+        )
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:

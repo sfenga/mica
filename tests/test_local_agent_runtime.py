@@ -28,20 +28,72 @@ FIXTURE = Path(__file__).parent / "fixtures" / "fake_streaming_cli.py"
 
 
 class RecordingProvider:
-    def __init__(self):
+    def __init__(self, write_artifact: bool = False, edit_file: str = ""):
         self.calls = []
+        self.write_artifact = write_artifact
+        self.edit_file = edit_file
 
-    def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
-        self.calls.append((workdir, resume_session_id))
+    def run(
+        self,
+        agent,
+        issue,
+        task,
+        on_event,
+        workdir=None,
+        resume_session_id=None,
+        is_cancelled=None,
+        replay_conflicts=None,
+    ):
+        listing = sorted(p.name for p in Path(workdir).iterdir()) if workdir else []
+        self.calls.append(
+            {
+                "workdir": workdir,
+                "resume_session_id": resume_session_id,
+                "listing": listing,
+                "replay_conflicts": list(replay_conflicts or []),
+            }
+        )
+        if self.write_artifact and workdir:
+            Path(workdir, f"artifact-{len(self.calls)}.txt").write_text("work", encoding="utf-8")
+        if self.edit_file and workdir:
+            target = Path(workdir, self.edit_file)
+            target.write_text(
+                target.read_text(encoding="utf-8") + f"agent turn {len(self.calls)}\n",
+                encoding="utf-8",
+            )
         on_event("agent.text", {"text": "done"})
         return ProviderRunResult(output="done", session_id=resume_session_id or "session-first")
+
+
+class FailOnceProvider:
+    """Fails the first run (infrastructure-style error), then delegates."""
+
+    def __init__(self, inner: RecordingProvider):
+        self.inner = inner
+        self.failures = 0
+
+    def run(self, *args, **kwargs):
+        if self.failures == 0:
+            self.failures += 1
+            raise RuntimeError("provider exploded before doing any work")
+        return self.inner.run(*args, **kwargs)
 
 
 class BlockingProvider:
     def __init__(self):
         self.started = threading.Event()
 
-    def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
+    def run(
+        self,
+        agent,
+        issue,
+        task,
+        on_event,
+        workdir=None,
+        resume_session_id=None,
+        is_cancelled=None,
+        replay_conflicts=None,
+    ):
         self.started.set()
         while True:
             if is_cancelled and is_cancelled():
@@ -55,7 +107,17 @@ class ConcurrencyProvider:
         self.maximum = 0
         self.lock = threading.Lock()
 
-    def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
+    def run(
+        self,
+        agent,
+        issue,
+        task,
+        on_event,
+        workdir=None,
+        resume_session_id=None,
+        is_cancelled=None,
+        replay_conflicts=None,
+    ):
         with self.lock:
             self.active += 1
             self.maximum = max(self.maximum, self.active)
@@ -66,7 +128,17 @@ class ConcurrencyProvider:
 
 
 class SlowProvider:
-    def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
+    def run(
+        self,
+        agent,
+        issue,
+        task,
+        on_event,
+        workdir=None,
+        resume_session_id=None,
+        is_cancelled=None,
+        replay_conflicts=None,
+    ):
         time.sleep(0.3)
         return ProviderRunResult(output="done", session_id=f"session-{task.id}")
 
@@ -81,6 +153,15 @@ class SlowWorktrees:
     def prepare(self, *args, **kwargs):
         time.sleep(self.delay)
         return self.inner.prepare(*args, **kwargs)
+
+    def finalize(self, *args, **kwargs):
+        return self.inner.finalize(*args, **kwargs)
+
+    def release(self, *args, **kwargs):
+        return self.inner.release(*args, **kwargs)
+
+    def sweep(self, *args, **kwargs):
+        return self.inner.sweep(*args, **kwargs)
 
 
 def create_git_repository(path: str) -> None:
@@ -272,11 +353,11 @@ class LocalAgentRuntimeTest(unittest.TestCase):
                     is_cancelled=lambda: time.monotonic() - started > 0.2,
                 )
 
-    def test_follow_up_reuses_worktree_branch_and_session(self):
+    def test_follow_up_continues_branch_and_session_with_a_fresh_worktree(self):
         with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
             create_git_repository(source)
             container = build_memory_container()
-            provider = RecordingProvider()
+            provider = RecordingProvider(write_artifact=True)
             container.providers.register("recording", provider)
             container.agents.add(
                 Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
@@ -295,11 +376,401 @@ class LocalAgentRuntimeTest(unittest.TestCase):
             self.assertTrue(container.daemon.run_once())
             second = container.tasks.list(issue.id)[1]
 
+            # The branch and the session continue; the worktree does not.
             self.assertEqual(first.branch_name, second.branch_name)
-            self.assertEqual(first.worktree_path, second.worktree_path)
+            self.assertNotEqual(first.worktree_path, second.worktree_path)
             self.assertEqual(first.session_id, second.prior_session_id)
-            self.assertEqual(first.session_id, provider.calls[1][1])
-            self.assertTrue(Path(second.worktree_path).is_dir())
+            self.assertEqual(first.session_id, provider.calls[1]["resume_session_id"])
+            self.assertIsNotNone(first.recorded_tip)
+            self.assertIsNotNone(second.recorded_tip)
+            # Both worktrees are finalized away; the second turn saw the first
+            # turn's delivered file through the branch.
+            self.assertFalse(Path(first.worktree_path).exists())
+            self.assertFalse(Path(second.worktree_path).exists())
+            self.assertIn("artifact-1.txt", provider.calls[1]["listing"])
+            # The delivered branch carries both turns' work in the user repo.
+            files = subprocess.run(
+                ["git", "-C", source, "ls-tree", "--name-only", first.branch_name],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            self.assertIn("artifact-1.txt", files)
+            self.assertIn("artifact-2.txt", files)
+
+    def test_dirty_source_repo_is_snapshotted_into_the_worktree(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            Path(source, "README.md").write_text("seed\nuser edit\n", encoding="utf-8")
+            Path(source, "scratch.txt").write_text("uncommitted", encoding="utf-8")
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="dirty repo",
+                body="review the current state",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            self.assertTrue(container.daemon.run_once())
+
+            # The agent saw the user's uncommitted state...
+            self.assertIn("scratch.txt", provider.calls[0]["listing"])
+            # ...and the user's own directory was never written to.
+            status = subprocess.run(
+                ["git", "-C", source, "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertIn("scratch.txt", status)
+            self.assertIn("README.md", status)
+
+    def test_merged_branch_resets_to_latest_head(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider(write_artifact=True)
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="two turns",
+                body="turn one delivers",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+            self.assertTrue(container.daemon.run_once())
+            first = container.tasks.list(issue.id)[0]
+
+            # The user merges the delivered branch and advances main.
+            subprocess.run(
+                ["git", "-C", source, "merge", "-q", "--no-edit", first.branch_name], check=True
+            )
+            Path(source, "main-progress.txt").write_text("new", encoding="utf-8")
+            subprocess.run(["git", "-C", source, "add", "main-progress.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "commit", "-q", "-m", "main moves on"], check=True
+            )
+
+            container.trigger_service.add_comment(issue.id, "继续", "user-1")
+            self.assertTrue(container.daemon.run_once())
+            second = container.tasks.list(issue.id)[1]
+
+            # Same branch, but rebased onto the latest HEAD: the second turn
+            # sees the merged work and the new main commit.
+            self.assertEqual(first.branch_name, second.branch_name)
+            self.assertIn("main-progress.txt", provider.calls[1]["listing"])
+            self.assertIn("artifact-1.txt", provider.calls[1]["listing"])
+            tip = subprocess.run(
+                ["git", "-C", source, "rev-parse", second.branch_name],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            head = subprocess.run(
+                ["git", "-C", source, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            is_descendant = subprocess.run(
+                ["git", "-C", source, "merge-base", "--is-ancestor", head, tip],
+                check=False,
+            ).returncode
+            self.assertEqual(0, is_descendant)
+
+    def test_conflicting_user_edits_block_delivery_and_keep_the_worktree(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider(edit_file="README.md")
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="conflict turn",
+                body="turn one edits README",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+            self.assertTrue(container.daemon.run_once())
+            first = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.COMPLETED, first.status)
+
+            # The agent's first turn rewrote README; the user then edited the
+            # same file in their own directory without committing.
+            Path(source, "README.md").write_text("user version\n", encoding="utf-8")
+
+            container.trigger_service.add_comment(issue.id, "继续", "user-1")
+            self.assertTrue(container.daemon.run_once())
+            second = container.tasks.list(issue.id)[1]
+
+            # The conflict reached the agent instead of being silently dropped...
+            self.assertIn("README.md", provider.calls[1]["replay_conflicts"])
+            # ...and finalize refused to deliver while it stayed unresolved.
+            self.assertEqual(TaskStatus.FAILED, second.status)
+            self.assertIn("unresolved merge", second.error or "")
+            preserved = Path(second.worktree_path).with_name("worktree-preserved")
+            self.assertTrue(preserved.is_dir())
+            self.assertEqual("user version\n", Path(source, "README.md").read_text())
+
+    def test_read_only_task_leaves_no_branch_behind(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="read only",
+                body="just look",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            self.assertTrue(container.daemon.run_once())
+
+            branches = subprocess.run(
+                ["git", "-C", source, "branch", "--list", "mica/*"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual("", branches.strip())
+            self.assertEqual([], list(Path(worktree_root).iterdir()))
+
+    def test_branch_without_checkpoint_is_never_adopted(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            # A branch named like ours but with no delivery record: a legacy
+            # branch from the durable-worktree era, or the user's own.
+            legacy = WorktreeManager._branch_name("unused", "unused")
+            container = build_memory_container()
+            provider = RecordingProvider(write_artifact=True)
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="legacy branch",
+                body="a branch with this name already exists",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+            expected = WorktreeManager._branch_name(issue.id, "local-assistant")
+            subprocess.run(["git", "-C", source, "branch", expected], check=True)
+
+            self.assertTrue(container.daemon.run_once())
+            task = container.tasks.list(issue.id)[0]
+
+            self.assertTrue(task.branch_name.startswith(expected + "-"))
+            self.assertNotEqual(legacy, task.branch_name)
+
+    def test_deleted_and_recreated_branch_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider(write_artifact=True)
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="tampered branch",
+                body="turn one",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+            self.assertTrue(container.daemon.run_once())
+            first = container.tasks.list(issue.id)[0]
+
+            # The user deletes the delivered branch and recreates the name on
+            # unrelated content.
+            subprocess.run(["git", "-C", source, "branch", "-D", first.branch_name], check=True)
+            Path(source, "unrelated.txt").write_text("theirs", encoding="utf-8")
+            subprocess.run(["git", "-C", source, "add", "unrelated.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", source, "checkout", "-q", "-b", first.branch_name], check=True
+            )
+            subprocess.run(
+                ["git", "-C", source, "commit", "-q", "-m", "user's own branch"], check=True
+            )
+            subprocess.run(["git", "-C", source, "checkout", "-q", "-"], check=True)
+
+            container.trigger_service.add_comment(issue.id, "继续", "user-1")
+            self.assertTrue(container.daemon.run_once())
+            second = container.tasks.list(issue.id)[1]
+
+            self.assertNotEqual(first.branch_name, second.branch_name)
+            self.assertTrue(second.branch_name.startswith(first.branch_name + "-"))
+
+    def test_cancelled_task_preserves_files_and_frees_the_branch(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = BlockingProvider()
+            container.providers.register("blocking", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="blocking")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="cancel me",
+                body="blocking",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+            task = container.tasks.list(issue.id)[0]
+            worker = threading.Thread(target=container.daemon.run_once)
+            worker.start()
+            self.assertTrue(provider.started.wait(timeout=2))
+            container.task_service.request_cancel(task.id)
+            worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            task = container.task_service.get(task.id)
+            self.assertEqual(TaskStatus.CANCELLED, task.status)
+            # Files preserved for inspection, branch registration released.
+            env_root = Path(task.worktree_path).parent
+            self.assertTrue((env_root / "worktree-preserved").is_dir())
+            listed = subprocess.run(
+                ["git", "-C", source, "worktree", "list"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertNotIn(str(env_root), listed)
+
+            # The freed branch can be checked out again immediately; a still
+            # registered worktree would make `worktree add` fail here.
+            probe = Path(worktree_root, "probe-checkout")
+            subprocess.run(
+                ["git", "-C", source, "worktree", "add", str(probe), task.branch_name],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", source, "worktree", "remove", "--force", str(probe)],
+                check=True,
+            )
+
+    def test_sweep_reclaims_terminal_task_env_roots(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider(write_artifact=True)
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            manager = WorktreeManager(worktree_root)
+            container.daemon.worktrees = manager
+            issue = container.trigger_service.create_issue(
+                title="sweep",
+                body="cancel while running",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            # Simulate a crashed daemon's leftover: an env root whose task is
+            # terminal (here: cancelled before start, then preserved).
+            prepared = manager.prepare(source, issue.id, "local-assistant", "task_orphan")
+            manager.release(prepared)
+            orphan_root = Path(prepared.env_root)
+            self.assertTrue(orphan_root.exists())
+
+            container.daemon.sweep_environments()
+
+            self.assertFalse(orphan_root.exists())
+
+    def test_failed_first_attempt_keeps_the_branch_name_on_retry(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            recorder = RecordingProvider(write_artifact=True)
+            container.providers.register("flaky", FailOnceProvider(recorder))
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="flaky")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            issue = container.trigger_service.create_issue(
+                title="flaky first turn",
+                body="provider dies, then retry",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            self.assertTrue(container.daemon.run_once())
+            first = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.FAILED, first.status)
+
+            container.trigger_service.add_comment(issue.id, "重试", "user-1")
+            self.assertTrue(container.daemon.run_once())
+            second = container.tasks.list(issue.id)[1]
+
+            # The retry adopts the branch the failed attempt created (the
+            # record ref carries its checkpoint even without a delivery):
+            # no suffixed fork, and the turn's work lands on the same branch.
+            self.assertEqual(TaskStatus.COMPLETED, second.status)
+            self.assertEqual(first.branch_name, second.branch_name)
+            self.assertIsNotNone(second.recorded_tip)
+
+    def test_untracked_payload_over_limit_fails_with_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            for index in range(3):
+                Path(source, f"extra-{index}.bin").write_bytes(b"x" * 16)
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = WorktreeManager(worktree_root)
+            import mica.runtime.worktree as worktree_module
+
+            original_limit = worktree_module.MAX_UNTRACKED_FILES
+            worktree_module.MAX_UNTRACKED_FILES = 2
+            try:
+                issue = container.trigger_service.create_issue(
+                    title="too much",
+                    body="untracked payload",
+                    workspace_id="demo",
+                    assignee_id="local-assistant",
+                    project_path=source,
+                )
+                self.assertTrue(container.daemon.run_once())
+            finally:
+                worktree_module.MAX_UNTRACKED_FILES = original_limit
+
+            task = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.FAILED, task.status)
+            self.assertIn("snapshot limit", task.error or "")
+            self.assertEqual([], provider.calls)
 
     def test_project_can_run_in_place_without_creating_a_worktree(self):
         with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as workspace_root:
@@ -322,7 +793,7 @@ class LocalAgentRuntimeTest(unittest.TestCase):
 
             self.assertTrue(container.daemon.run_once())
             task = container.tasks.list(issue.id)[0]
-            self.assertEqual(source, provider.calls[0][0])
+            self.assertEqual(source, provider.calls[0]["workdir"])
             self.assertIsNone(task.worktree_path)
             self.assertIsNone(task.branch_name)
 
@@ -343,7 +814,7 @@ class LocalAgentRuntimeTest(unittest.TestCase):
             )
 
             self.assertTrue(container.daemon.run_once())
-            workdir = Path(provider.calls[0][0])
+            workdir = Path(provider.calls[0]["workdir"])
             self.assertTrue(workdir.is_dir())
             self.assertTrue(workdir.is_relative_to(Path(workspace_root).resolve()))
             self.assertEqual([], list(workdir.iterdir()))

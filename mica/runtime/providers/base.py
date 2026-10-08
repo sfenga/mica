@@ -4,7 +4,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol
 
 from mica.domain import Agent, Issue, Task
 
@@ -62,8 +62,26 @@ def _ctx_block(resumed: bool) -> str:
 
 
 def build_task_prompt(
-    issue: Issue, task: Task, resumed: bool = False, ctx_channel: bool = False
+    issue: Issue,
+    task: Task,
+    resumed: bool = False,
+    ctx_channel: bool = False,
+    replay_conflicts: Optional[List[str]] = None,
 ) -> str:
+    prompt = _base_prompt(issue, task, resumed, ctx_channel)
+    if replay_conflicts:
+        files = "\n".join(f"- {name}" for name in replay_conflicts)
+        prompt = (
+            "## Merge conflicts to resolve first\n\n"
+            "The user's local edits since the previous turn could not be merged with "
+            "the work already on your branch. Resolve the conflicts in these files "
+            "before anything else, and never commit conflict markers:\n\n"
+            f"{files}\n\n"
+        ) + prompt
+    return prompt
+
+
+def _base_prompt(issue: Issue, task: Task, resumed: bool, ctx_channel: bool) -> str:
     if task.trigger_type == "comment.created":
         delivered = task.delivered_comment_ids or [
             *task.merged_comment_ids,
@@ -112,6 +130,7 @@ class AgentProvider(Protocol):
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult: ...
 
 

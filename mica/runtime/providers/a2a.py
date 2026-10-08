@@ -47,6 +47,7 @@ class A2aProvider:
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
+        replay_conflicts: Optional[List[str]] = None,
     ) -> ProviderRunResult:
         config = agent.provider_config
         timeout = float(config.get("timeout_seconds", 300))

@@ -110,6 +110,18 @@
 | “任务所有权有租约和代次。” | Daemon 崩溃后怎么办？ | 过期任务可重新排队，重新领取递增 attempt；旧 worker 的终态写回会被所有权检查拒绝。它保护数据库状态，无法撤销已经发生的文件或远程副作用。 |
 | “Worktree 按 Issue/Agent 复用。” | 为什么不按每个 Task 新建？ | 用户对同一事项会多次追问，每轮新建会切断代码连续性；Issue/Agent 既区分执行者，也让该执行者能延续工作。 |
 
+### 模型更新（2026-10-08）：一次性副本 + 分支交付，并打通“A 生成 → B 审核”
+
+上面第一轮讲法、实现路线第 3～4 步与追问表中“继续使用原来的分支、目录”“Worktree 按 Issue/Agent 复用”“源仓库存在未提交修改会拒绝准备”的口径，描述的是 2026-10-08 之前的持久副本模型，保留供对照。当前版本对齐 Multica：
+
+- **每轮新建副本，续接的是分支和会话**：Worktree 落在 Daemon 管理的 `<root>/<repo-hash>/<task-id>/`，收尾即回收；跨轮持久的是用户仓库里的 `mica/<issue>/<agent>` 分支（命名不变）和 CLI 会话（Claude 跨目录 resume 已实测）。“为什么不按每个 Task 新建”的新答案：代码连续性由分支保证，目录本来就不必持久；持久副本反而会继承上一轮残留、冻结基线、永久占用分支。
+- **脏仓库不再拒绝**：用户未提交修改打成快照注入副本；两轮之间用户改了 Agent 改过的文件会在副本里形成真实冲突，冲突文件写进下一轮 prompt，未解决前拒绝交付。
+- **交付契约**：收尾自动提交残留改动、回收副本，结果评论附分支名与 tip commit；分支已合入主干时下一轮重置到最新 HEAD。
+- **A 生成 → B 审核**：分支引用是跨 Agent 传递代码产物的通用载体——审核 Agent 在同一仓库的任意副本里执行 `git diff HEAD...<分支>` 即可看到生成 Agent 的本轮改动，无需共享分支或检出。
+- **新边界**：依赖不跨轮保留；finalize 提交与状态回写之间有崩溃窗口，由分支续接兜底；旧模型遗留分支一律冻结不续接。下文“面试时要守住的边界”中“失败残留的目录与分支不清理”一条随之作废：失败/取消的现场保留为 `worktree-preserved`，Daemon 启动时由 `sweep()` 统一回收。
+
+面试讲法可在原 45～60 秒版本基础上替换一句：“后续新 Task 查找历史执行，续接同一交付分支和 Agent 会话；Worktree 副本每轮新建、用完回收，分支是唯一持久成果。”
+
 ### 面试时要守住的边界
 
 - Worktree 提供代码工作目录隔离，不是容器或操作系统安全沙箱；不同分支最终仍可能发生合并冲突。
@@ -123,7 +135,7 @@
 - [Worktree 创建与复用](../../mica/runtime/worktree.py)：`prepare()`、`_prepare_locked()`。
 - [历史执行与租约](../../mica/infrastructure/database/repositories.py)：`find_previous()`、`renew_lease()`、`recover_expired()`。
 - [本地 CLI 启动、恢复与取消](../../mica/runtime/providers/cli.py)：`run()`、`_command()`、`_terminate()`。
-- [本地运行测试](../../tests/test_local_agent_runtime.py)：`test_follow_up_reuses_worktree_branch_and_session` 检查分支、目录、Session 的续接；另有容量利用、取消和原目录串行测试。
+- [本地运行测试](../../tests/test_local_agent_runtime.py)：`test_follow_up_continues_branch_and_session_with_a_fresh_worktree` 检查分支、副本路径、Session 的续接（原 `test_follow_up_reuses_worktree_branch_and_session`，2026-10-08 随模型更新改名）；另有脏仓库快照、冲突拒付、合并后重置、取消保留与 sweep 清理等场景测试。
 
 ## 三、异构 Agent 接入
 

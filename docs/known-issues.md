@@ -320,7 +320,7 @@ Daemon A 领取 Task，得到 `attempt=1` 和 120 秒租约，随后开始创建
 
 ## KI-004：Squad 成员代码工作区按 (Issue, Agent) 隔离，缺少协作共享与集成路径
 
-- **状态**：待设计
+- **状态**：已解决（2026-10-08，见文末"解决记录"；下文"当前行为"等小节保留对齐前的历史分析）
 - **优先级**：P2（只影响"多个本地 Coding Agent 接力改同一份代码"的 Squad 场景；只读分析与远程 A2A 成员不受影响）
 - **涉及模块**：Worktree、Daemon 执行上下文、Squad 编排；与 KI-002（共享上下文）联动
 
@@ -384,6 +384,23 @@ Issue 指派给 Squad：Leader（本地 Coding Agent）在自己分支搭好接�
 - 若支持共享：成员任务能看到 Leader 或前序成员在同一 Issue 下已交付的改动。
 - 若不共享：委派时平台明确告知成员无法看到其他成员分支，并给出集成路径说明。
 - 与 KI-002 的 Task 依赖引用联动：代码产物引用（分支、commit）可成为 Task 依赖声明的一部分。
+
+### 解决记录（2026-10-08）
+
+按"待决策项 1 = 成员独立交付 + 用户/Leader 合并、待决策项 3 = 每任务一次性 Worktree + 分支持久（Multica 模式）"落地，worktree 执行模式整体重写：
+
+- **一次性副本 + 分支交付**：副本位于 Daemon env root（`<worktree-root>/<repo-hash>/<task-id>/worktree`），任务收尾后回收；唯一持久成果是用户仓库里的 `mica/<issue>/<agent>` 分支。集成回路闭合：分支被用户合入主干后，下一轮 `prepare` 经 `merge-base --is-ancestor` 检测并以 `worktree add -B` 重置到最新 HEAD（对应上文"实施路径"第一期第 1 条）。
+- **归属与 checkpoint**（第一期第 3 条）：分支 tip checkpoint 存 `agent_task.recorded_tip`（migration 010），隐藏 ref `refs/mica/local-state/<branch>` 记录快照锚点与 finalize 时的 tip（第二父提交）。续接前校验 checkpoint 仍是分支祖先；DB 没有 checkpoint 时回落到隐藏 ref 的记录（覆盖 finalize 与回写之间的崩溃窗口，也让失败重试沿用原分支名）；两者皆无的同名分支（旧模型遗留、用户自建、删除重建）一律冻结、以 task 短后缀另开，不会被误续接。
+- **脏仓库快照重放**（第一期第 4 条）：私有 `GIT_INDEX_FILE` 对用户工作区 `add -A` + `write-tree` + `commit-tree` 生成 user state 快照，重放进新副本（2000 文件 / 200MiB 上限，gitignore 自动排除）；用户目录全程不被写入。两轮之间用户改动与分支内容冲突时，冲突留在副本内、文件列表写入下一轮 prompt，Agent 未解决前 finalize 拒绝交付并保留现场。
+- **交付契约**：finalize 把残留改动自动提交进分支（提交前剔除 Agent 工具落在副本里的会话状态目录如 `.omc/`，`git add -A` 对瞬态文件竞争有重试），结果评论自动附分支名与 tip（`git diff HEAD...<branch>` 即可审核），打通"A 生成 → B 审核"的引用传递——成员间代码不可见的语义不变，但引用传递不再需要共享分支。只读任务不留分支。
+- **失败/取消**：副本保留现场（`worktree-preserved`），分支注册随即释放，Daemon 启动时 `sweep()` 清理任务已终结的 env root 与孤儿 ref。
+
+残留边界：
+
+- 依赖（node_modules 等）不跨轮保留，每轮副本需重装——已接受的代价，依赖全局包缓存摊销。
+- finalize（提交分支）与任务状态回写之间存在崩溃窗口：分支已提交但任务标失败时，下一轮从分支 tip 续接不丢工作，符合既有 at-least-once 语义。
+- 旧模型遗留的 `/tmp/mica-worktrees` 目录与 `mica/<issue>/<agent>` 分支全部冻结不续接，可手动删除。
+- 待决策项 2（共享分支并发互斥）随"不共享"结论作废；待决策项 4（A2A 混合 Squad 的产物传递）仍开放。
 
 ---
 

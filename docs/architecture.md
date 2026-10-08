@@ -37,9 +37,11 @@ Web 请求 → TriggerService → Issue + Task → Daemon → AgentProvider
 - Codex 与 Claude Code 通过 `CliProvider` 以 JSONL 流式运行，输出转换为统一 TaskEvent。
 - Daemon 在有空闲 Slot 时才领取任务，领取后立即由心跳线程续租，Worktree/Session 准备阶段与执行阶段同样受租约保护；准备期间失去租约或停机时，放弃启动 Provider 并交回过期恢复。
 - 取消请求由 Provider 轮询并终止整个本地进程组。
-- 本地项目显式配置 `in_place` 或 `worktree`：前者串行操作当前目录，后者为 `(Issue, Agent)` 创建持久 Git Worktree 和独立分支。
+- 本地项目显式配置 `in_place` 或 `worktree`：前者串行操作当前目录，后者为每个任务创建一次性 Git Worktree 副本，持久成果是用户仓库里的 `(Issue, Agent)` 分支；任务结束副本即回收，失败/取消保留现场并由 Daemon 启动时的 sweep 清理。
 - 未关联项目的本地任务在 Daemon 管理的隔离空目录中运行；远程 A2A 任务不分配本机工作目录。
-- 后续评论产生的新 Task 复用上一次 CLI Session；Worktree 模式还会复用同一分支和 Worktree。
+- Worktree 副本从用户目录的当前状态出发：未提交修改以私有索引快照注入（有文件数/字节上限），用户目录不被写入；两轮之间用户改动的重放冲突写入下一轮 prompt，未解决前拒绝交付。
+- 任务收尾把残留改动自动提交进分支并记录 `recorded_tip` checkpoint；分支已合入主干时下一轮重置到最新 HEAD，否则从 tip 续接；同名分支无 checkpoint（含旧模型遗留）一律冻结另开。
+- 后续评论产生的新 Task 复用上一次 CLI Session 与交付分支（副本每轮新建）；完成时结果评论附分支名与 tip，供其他 Agent 经 `git diff HEAD...<branch>` 审核。
 - Agent 尚未领取任务时，连续评论通过 PostgreSQL 部分唯一索引与 UPSERT 合并；Agent 已在执行时，只创建一个 queued 后续 Task，避免重复启动且不改写正在执行的输入。
 - Daemon 启动或轮询时把租约过期的 Task 恢复到队列，再以新 attempt 执行。
 

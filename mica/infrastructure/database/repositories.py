@@ -25,7 +25,7 @@ TASK_COLUMNS = """
 id, issue_id, agent_id, runtime_id, trigger_type, trigger_id, status,
  squad_id, is_leader_task, delegated_from_task_id, handoff_note,
 trigger_comment_id, merged_comment_ids, delivered_comment_ids,
-session_id, prior_session_id, branch_name, worktree_path, lease_expires_at,
+session_id, prior_session_id, branch_name, worktree_path, recorded_tip, lease_expires_at,
 claimed_by, attempt, cancel_requested, output, error, created_at, updated_at
 """
 
@@ -52,6 +52,7 @@ def _task(row) -> Optional[Task]:
         prior_session_id=row["prior_session_id"],
         branch_name=row["branch_name"],
         worktree_path=row["worktree_path"],
+        recorded_tip=row["recorded_tip"],
         lease_expires_at=row["lease_expires_at"],
         claimed_by=row["claimed_by"],
         attempt=row["attempt"],
@@ -266,7 +267,7 @@ class PostgresTaskRepository:
                 """UPDATE agent_task SET status=%s, trigger_comment_id=%s,
                     merged_comment_ids=%s, delivered_comment_ids=%s,
                     session_id=%s, prior_session_id=%s,
-                    branch_name=%s, worktree_path=%s, lease_expires_at=%s, claimed_by=%s,
+                    branch_name=%s, worktree_path=%s, recorded_tip=%s, lease_expires_at=%s, claimed_by=%s,
                     attempt=%s, cancel_requested=%s, output=%s, error=%s, updated_at=%s
                     WHERE id=%s RETURNING id""",
                 (
@@ -278,6 +279,7 @@ class PostgresTaskRepository:
                     task.prior_session_id,
                     task.branch_name,
                     task.worktree_path,
+                    task.recorded_tip,
                     task.lease_expires_at,
                     task.claimed_by,
                     task.attempt,
@@ -442,6 +444,7 @@ class PostgresTaskRepository:
             task.prior_session_id,
             task.branch_name,
             task.worktree_path,
+            task.recorded_tip,
             task.lease_expires_at,
             task.claimed_by,
             task.attempt,

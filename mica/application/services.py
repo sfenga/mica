@@ -263,6 +263,23 @@ class TaskService:
     def previous_execution(self, task: Task) -> Optional[Task]:
         return self.tasks.find_previous(task.issue_id, task.agent_id, task.id)
 
+    def record_delivery(
+        self,
+        task_id: str,
+        branch_name: str,
+        recorded_tip: str,
+        worker_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> Task:
+        with self._transaction():
+            task = self._locked_task(task_id)
+            self._require_owner(task, worker_id, attempt)
+            self._require(task, TaskStatus.RUNNING)
+            task.branch_name = branch_name
+            task.recorded_tip = recorded_tip
+            task.updated_at = utc_now()
+            return self.tasks.save(task)
+
     def has_pending(
         self, issue_id: str, agent_id: str, is_leader_task: Optional[bool] = None
     ) -> bool:
