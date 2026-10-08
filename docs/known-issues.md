@@ -266,14 +266,15 @@ B 不会自动得到 A 的 Session、A 已发布的结果评论、Issue 的其�
 
 ## KI-003：Task 准备阶段存在租约空窗
 
-- **状态**：待设计（续租异常子问题已于 2026-10-01 修复）
+- **状态**：已修复（2026-10-08；"Worktree 准备可中断与失败清理"拆出为独立后续项，见待决策项 4）
 - **优先级**：P1
 - **涉及模块**：Daemon、Task Lease、Worktree/Session 准备、PostgreSQL Task Repository、Provider 取消
 
 ### 当前行为
 
 - Daemon 领取 Task 时写入 `claimed_by` 和 `lease_expires_at`，并递增 `attempt`。
-- 领取成功后，Daemon 先恢复 Session、创建或复用 Worktree、准备工作目录并绑定执行上下文；Task 进入 `running` 后才启动心跳线程。
+- 领取成功后立即启动心跳线程，`dispatched` 准备阶段（恢复 Session、创建或复用 Worktree、准备工作目录）与 `running` 执行阶段都处于续租保护下；心跳线程在 `run_once` 的 `finally` 中统一停止（2026-10-08 修复，见 `mica/runtime/daemon.py` `run_once()`）。
+- 准备完成后、绑定执行上下文之前，若 `lease_lost` 或停机标记已置位，则放弃启动 Provider 且不做终态写回，任务交由过期恢复重排（2026-10-08 修复）。
 - 心跳按固定周期调用 `renew_lease()`。返回 `False` 时立即设置 `lease_lost`；续约抛异常时记录日志并按心跳周期继续重试，距上次成功续约超过 `lease_seconds` 仍失败才设置 `lease_lost`。Provider 通过取消检查停止执行（2026-10-01 修复，见 `mica/runtime/daemon.py` `_heartbeat()`）。
 - 轮询时会把租约已过期的 `dispatched/running` Task 恢复为 `queued`，供其他 Daemon 重新领取。
 - Task 完成或失败写回时校验 `worker_id + attempt`，防止旧 Worker 覆盖新一轮结果。
@@ -284,6 +285,8 @@ B 不会自动得到 A 的 Session、A 已发布的结果评论、Issue 的其�
 2. **旧代次校验只能保护最终状态**：`worker_id + attempt` 可以拒绝旧 Worker 的完成写回，但无法撤销已经发生的 Git 操作、文件修改或外部 API 调用，因此仍可能产生重复副作用和状态抖动。
 
 > 原第 2 条"续租异常不会可靠触发停止"已于 2026-10-01 修复：心跳线程捕获续约异常后按本地租约截止时间重试，超时判定失租并设置 `lease_lost`。测试覆盖见 `tests/test_local_agent_runtime.py` 的 `test_heartbeat_renewal_errors_stop_execution_at_lease_deadline` 与 `test_transient_renewal_error_does_not_interrupt_execution`。
+>
+> 原第 1 条"准备阶段存在租约空窗"已于 2026-10-08 修复：心跳线程在 Task 领取后立即启动，准备阶段同样续租（`renew_lease` 本就覆盖 `dispatched` 状态，无 schema 变更）；准备完成后若已失租或停机，放弃启动 Provider 且不做终态写回。测试覆盖见 `tests/test_local_agent_runtime.py` 的 `test_heartbeat_renews_lease_while_preparation_runs`、`test_lease_lost_during_preparation_aborts_before_provider` 与 `test_second_daemon_does_not_reclaim_a_slowly_preparing_task`。
 
 ### 典型场景
 
@@ -291,26 +294,27 @@ Daemon A 领取 Task，得到 `attempt=1` 和 120 秒租约，随后开始创建
 
 ### 期望方向
 
-- 在 Task 成功领取后立即启动心跳，使 `dispatched` 准备阶段和 `running` 执行阶段都处于续租保护下；或显式区分 prepare lease 与 running lease。
+- ~~在 Task 成功领取后立即启动心跳，使 `dispatched` 准备阶段和 `running` 执行阶段都处于续租保护下；或显式区分 prepare lease 与 running lease。~~（已采用单一租约 + 领取后立即心跳。）
 - 保留 `worker_id + attempt` 的条件写回，作为旧 Worker 晚到写回的最后一道保护。
 - 明确 Worktree 准备被取消或失去租约后的清理策略，避免残留目录和分支。
 
 ### 待决策项
 
-1. 准备阶段和运行阶段共用一个租约，还是分别设置 prepare lease 与 running lease。
+1. ~~准备阶段和运行阶段共用一个租约，还是分别设置 prepare lease 与 running lease。~~（已定：共用单一租约，领取后立即心跳；`renew_lease` 的 SQL 与内存实现本就覆盖 `dispatched`，无 schema 变更。）
 2. ~~数据库短暂不可用时允许多少次失败、采用什么退避策略，以及何时判定租约丢失。~~（已定：窗口内按心跳周期重试，超过"上次成功续约 + `lease_seconds`"判定丢失。）
 3. ~~无法确认租约时采用立即停止的 fail-closed 策略，还是允许在有限窗口内继续运行。~~（已定：窗口内继续以容忍瞬时抖动，窗口耗尽即停止，等价于租约失效点 fail-closed。）
-4. Worktree 创建过程中如何响应取消，以及失败后的目录、分支清理边界。
-5. 多 Daemon 并发测试是否作为启用生产模式前的强制验收项。
+4. Worktree 创建过程中如何响应取消，以及失败后的目录、分支清理边界。（2026-10-08 拆出为独立后续项：`prepare()` 保持原子完成，取消与失租仅在完成点检查；残留目录与分支按现状保留，作为同 Issue/Agent 复用语义的一部分。）
+5. ~~多 Daemon 并发测试是否作为启用生产模式前的强制验收项。~~（已定：已补双 Daemon 并发测试，见 `test_second_daemon_does_not_reclaim_a_slowly_preparing_task`。）
 
 ### 验收条件
 
-- 健康 Daemon 的准备时间超过初始租约时，Task 不会被其他 Daemon 重复领取。
+- 健康 Daemon 的准备时间超过初始租约时，Task 不会被其他 Daemon 重复领取。（已覆盖：`test_heartbeat_renews_lease_while_preparation_runs`）
 - 短暂数据库异常在容忍范围内恢复后，Task 可以继续执行且不会重复领取。（已覆盖：`test_transient_renewal_error_does_not_interrupt_execution`）
 - 续租长期失败时，Daemon 会在租约失效前后及时停止 Provider 和子进程。（已覆盖：`test_heartbeat_renewal_errors_stop_execution_at_lease_deadline`）
 - Task 被新 Daemon 以更高 attempt 领取后，旧 Worker 无法写回终态。
-- 两个 Daemon 并发运行且人为延长准备阶段时，不会同时执行同一 Task。
-- 心跳线程在成功、失败、取消和租约丢失路径中都能正常退出，不产生线程泄漏。
+- 两个 Daemon 并发运行且人为延长准备阶段时，不会同时执行同一 Task。（已覆盖：`test_second_daemon_does_not_reclaim_a_slowly_preparing_task`）
+- 准备期间失去租约时，Provider 不会启动，任务被过期恢复重排。（已覆盖：`test_lease_lost_during_preparation_aborts_before_provider`）
+- 心跳线程在成功、失败、取消和租约丢失路径中都能正常退出，不产生线程泄漏。（心跳在 `run_once` 的 `finally` 中统一停止，覆盖领取后提前失败的路径。）
 
 ---
 

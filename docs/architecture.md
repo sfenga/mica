@@ -35,7 +35,7 @@ Web 请求 → TriggerService → Issue + Task → Daemon → AgentProvider
 ## 阶段 3：本地 Agent 闭环
 
 - Codex 与 Claude Code 通过 `CliProvider` 以 JSONL 流式运行，输出转换为统一 TaskEvent。
-- Daemon 在有空闲 Slot 时才领取任务，并在执行期间续租。
+- Daemon 在有空闲 Slot 时才领取任务，领取后立即由心跳线程续租，Worktree/Session 准备阶段与执行阶段同样受租约保护；准备期间失去租约或停机时，放弃启动 Provider 并交回过期恢复。
 - 取消请求由 Provider 轮询并终止整个本地进程组。
 - 本地项目显式配置 `in_place` 或 `worktree`：前者串行操作当前目录，后者为 `(Issue, Agent)` 创建持久 Git Worktree 和独立分支。
 - 未关联项目的本地任务在 Daemon 管理的隔离空目录中运行；远程 A2A 任务不分配本机工作目录。

@@ -11,6 +11,7 @@ from pathlib import Path
 from mica.bootstrap import build_memory_container
 from mica.domain import Agent, AssigneeType, Issue, IssueStatus, Runtime, TaskStatus, utc_now
 from mica.runtime import WorkspaceManager, WorktreeManager
+from mica.runtime.daemon import Daemon, RuntimeSlotPool
 from mica.runtime.providers import (
     CliProvider,
     ProviderCancelled,
@@ -68,6 +69,18 @@ class SlowProvider:
     def run(self, agent, issue, task, on_event, workdir=None, resume_session_id=None, is_cancelled=None):
         time.sleep(0.3)
         return ProviderRunResult(output="done", session_id=f"session-{task.id}")
+
+
+class SlowWorktrees:
+    """Delays WorktreeManager.prepare to simulate a slow repository setup."""
+
+    def __init__(self, inner: WorktreeManager, delay: float) -> None:
+        self.inner = inner
+        self.delay = delay
+
+    def prepare(self, *args, **kwargs):
+        time.sleep(self.delay)
+        return self.inner.prepare(*args, **kwargs)
 
 
 def create_git_repository(path: str) -> None:
@@ -462,6 +475,129 @@ class LocalAgentRuntimeTest(unittest.TestCase):
         self.assertGreaterEqual(calls["count"], 2)
         events = [event.event_type for event in container.events.list(task.id)]
         self.assertNotIn("task.interrupted", events)
+
+    def test_heartbeat_renews_lease_while_preparation_runs(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = SlowWorktrees(WorktreeManager(worktree_root), delay=2.0)
+            container.daemon.lease_seconds = 1
+            container.daemon.heartbeat_seconds = 0.05
+            issue = container.trigger_service.create_issue(
+                title="big worktree",
+                body="preparation outlasts the initial lease",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            worker = threading.Thread(target=container.daemon.run_once)
+            worker.start()
+            time.sleep(1.5)
+            self.assertEqual([], container.task_service.recover_expired("local"))
+            worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            task = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.COMPLETED, task.status)
+            self.assertEqual(1, task.attempt)
+            self.assertEqual(1, len(provider.calls))
+            self.assertNotIn(
+                "task.recovered", [event.event_type for event in container.events.list(task.id)]
+            )
+
+    def test_lease_lost_during_preparation_aborts_before_provider(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            container.daemon.worktrees = SlowWorktrees(WorktreeManager(worktree_root), delay=0.3)
+            container.daemon.lease_seconds = 1
+            container.daemon.heartbeat_seconds = 0.05
+
+            def always_lost(task_id, worker_id, lease_seconds=120):
+                return False
+
+            container.task_service.renew_lease = always_lost
+            issue = container.trigger_service.create_issue(
+                title="stolen lease",
+                body="another daemon reclaimed the task during preparation",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            self.assertTrue(container.daemon.run_once())
+
+            self.assertEqual([], provider.calls)
+            task = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.DISPATCHED, task.status)
+            self.assertIsNone(task.output)
+            time.sleep(1.0)
+            recovered = container.task_service.recover_expired("local")
+            self.assertEqual(1, len(recovered))
+            self.assertEqual(1, recovered[0].attempt)
+            self.assertEqual(TaskStatus.QUEUED, container.task_service.get(task.id).status)
+
+    def test_second_daemon_does_not_reclaim_a_slowly_preparing_task(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as worktree_root:
+            create_git_repository(source)
+            container = build_memory_container()
+            provider = RecordingProvider()
+            container.providers.register("recording", provider)
+            container.agents.add(
+                Agent(id="local-assistant", name="Local", runtime_id="local", provider="recording")
+            )
+            slow_worktrees = SlowWorktrees(WorktreeManager(worktree_root), delay=2.0)
+            container.daemon.worktrees = slow_worktrees
+            container.daemon.lease_seconds = 1
+            container.daemon.heartbeat_seconds = 0.05
+            second = Daemon(
+                worker_id="daemon-b",
+                runtime_id="local",
+                tasks=container.task_service,
+                issues=container.issues,
+                agents=container.agents,
+                providers=container.providers,
+                slots=RuntimeSlotPool({"local": 1}),
+                worktrees=slow_worktrees,
+                lease_seconds=1,
+                heartbeat_seconds=0.05,
+            )
+            issue = container.trigger_service.create_issue(
+                title="two daemons",
+                body="preparation outlasts the initial lease of the first daemon",
+                workspace_id="demo",
+                assignee_id="local-assistant",
+                project_path=source,
+            )
+
+            worker = threading.Thread(target=container.daemon.run_once)
+            worker.start()
+            polls = 0
+            deadline = time.monotonic() + 3
+            while worker.is_alive() and time.monotonic() < deadline:
+                self.assertFalse(second.run_once())
+                polls += 1
+                time.sleep(0.05)
+            worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertGreaterEqual(polls, 5)
+            task = container.tasks.list(issue.id)[0]
+            self.assertEqual(TaskStatus.COMPLETED, task.status)
+            self.assertEqual(1, task.attempt)
+            self.assertEqual("daemon-local-1", task.claimed_by)
+            self.assertEqual(1, len(provider.calls))
 
     def test_worker_uses_all_configured_runtime_slots(self):
         container = build_memory_container()

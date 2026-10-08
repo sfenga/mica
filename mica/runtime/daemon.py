@@ -129,6 +129,15 @@ class Daemon:
             task = self.tasks.claim_next(self.runtime_id, self.worker_id, self.lease_seconds)
             if task is None:
                 return False
+            # Renewals must cover the preparation phase too: worktree or
+            # session setup can outlast the initial lease, and an unrenewed
+            # lease would let another daemon reclaim the task mid-preparation.
+            heartbeat_thread = Thread(
+                target=self._heartbeat,
+                args=(task.id, heartbeat_stop, lease_lost),
+                daemon=True,
+            )
+            heartbeat_thread.start()
             issue = self.issues.get(task.issue_id)
             agent = self.agents.get(task.agent_id)
             if issue is None:
@@ -172,6 +181,11 @@ class Daemon:
                 branch_name = None
                 worktree_path = None
                 workdir = self.workspaces.prepare(issue.id, agent.id)
+            if lease_lost.is_set() or self._shutdown.is_set():
+                # The lease was lost while preparing or the daemon is
+                # stopping; leave the row for lease-expiry recovery instead
+                # of writing a state we may no longer own.
+                return True
             task = self.tasks.bind_execution_context(
                 task.id,
                 prior_session_id,
@@ -184,12 +198,6 @@ class Daemon:
                 self._cancel_task(task)
                 return True
             self.tasks.start(task.id, self.worker_id, task.attempt)
-            heartbeat_thread = Thread(
-                target=self._heartbeat,
-                args=(task.id, heartbeat_stop, lease_lost),
-                daemon=True,
-            )
-            heartbeat_thread.start()
 
             def cancellation_check() -> bool:
                 return (
