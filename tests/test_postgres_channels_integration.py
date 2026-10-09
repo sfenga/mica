@@ -174,6 +174,44 @@ def test_postgres_merges_queued_comments_and_snapshots_them_when_claimed():
 @pytest.mark.skipif(
     not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database"
 )
+def test_postgres_origin_persists_thread_id_and_outbox_reply_target():
+    container = build_postgres_container(
+        os.environ["MICA_TEST_DATABASE_URL"], default_provider="stub"
+    )
+    try:
+        with container.database.transaction():
+            issue, _ = container.ingress_service.submit(
+                IngressCommand(
+                    channel="feishu",
+                    tenant_key=f"tenant-{uuid4().hex}",
+                    external_event_id=f"evt-{uuid4().hex}",
+                    external_user_id="ou-user",
+                    display_name="User",
+                    conversation_id="oc-chat",
+                    external_message_id="om-origin",
+                    thread_id="omt-topic",
+                    title="thread id persistence",
+                    body="topic message body",
+                    workspace_id="integration-workspace",
+                    assignee_id="local-assistant",
+                )
+            )
+            origin = container.channels.get_origin(issue.id)
+            assert origin.thread_id == "omt-topic"
+            with container.database.connection() as connection:
+                row = connection.execute(
+                    "SELECT payload FROM outbox_message WHERE message_type='issue.accepted'"
+                ).fetchone()
+            assert row["payload"]["reply_to"] == "om-origin"
+            assert row["payload"]["reply_in_thread"] is True
+            raise RollbackSmokeTest
+    except RollbackSmokeTest:
+        pass
+
+
+@pytest.mark.skipif(
+    not os.getenv("MICA_TEST_DATABASE_URL"), reason="requires a disposable PostgreSQL database"
+)
 def test_postgres_issue_deletion_cleans_references_and_rolls_back():
     from unittest.mock import patch
 

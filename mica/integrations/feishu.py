@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -8,6 +9,8 @@ from typing import Mapping, Optional
 
 from mica.application.channels import IngressCommand, IngressService
 from mica.domain import AssigneeType, OutboxMessage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,7 @@ class FeishuWebhook:
         if not body:
             return
         tenant_key = header.tenant_key or sender.tenant_key or "unknown"
+        thread_id = getattr(message, "thread_id", None) or None
         related_origin = None
         for related_message_id in (
             getattr(message, "parent_id", None),
@@ -107,6 +111,7 @@ class FeishuWebhook:
                 assignee_type=assignee_type,
                 event_type=header.event_type or "im.message.receive_v1",
                 related_issue_id=related_origin.issue_id if related_origin else None,
+                thread_id=thread_id,
             )
         )
 
@@ -120,6 +125,26 @@ def parse_feishu_target(text: str, default_agent_id: str) -> tuple[AssigneeType,
     return AssigneeType.AGENT, default_agent_id, cleaned
 
 
+class FeishuApiError(RuntimeError):
+    """Carries the Lark business code so the sender can classify failures."""
+
+    def __init__(self, code: int, msg: str, request_id: str) -> None:
+        super().__init__(
+            f"Feishu message API failed: code={code}, msg={msg}, request_id={request_id}"
+        )
+        self.code = code
+
+
+# Reply-endpoint business codes that mean "this trigger message/topic cannot
+# receive a reply and nothing was sent": message recalled (230011), topic gone
+# (230019), message invisible to the operator (230050), group does not support
+# reply-in-thread (230071), aggregated message (230072), self-destructing
+# message (230111). Only these justify a chat-level fallback; rate limits, 5xx
+# and ambiguous errors stay failures so the outbox retry never duplicates a
+# reply or leaks a thread-only reply into the main group chat.
+NON_REPLYABLE_CODES = frozenset({230011, 230019, 230050, 230071, 230072, 230111})
+
+
 class FeishuMessageSender:
     def __init__(self, config: FeishuConfig) -> None:
         import lark_oapi as lark
@@ -129,26 +154,65 @@ class FeishuMessageSender:
         )
 
     def send(self, message: OutboxMessage) -> None:
+        text = str(message.payload.get("text", ""))
+        reply_to = str(message.payload.get("reply_to") or "")
+        if reply_to:
+            try:
+                self._reply(
+                    reply_to,
+                    text,
+                    bool(message.payload.get("reply_in_thread")),
+                    message.id,
+                )
+                return
+            except FeishuApiError as exc:
+                if exc.code not in NON_REPLYABLE_CODES:
+                    raise
+                logger.warning(
+                    "feishu reply target %s unusable (%s); falling back to chat-level send",
+                    reply_to,
+                    exc,
+                )
+        self._create(message.destination, text, message.id)
+
+    def _create(self, chat_id: str, text: str, uuid: str) -> None:
         from lark_oapi.api.im.v1.model.create_message_request import CreateMessageRequest
         from lark_oapi.api.im.v1.model.create_message_request_body import CreateMessageRequestBody
 
         body = (
             CreateMessageRequestBody.builder()
-            .receive_id(message.destination)
+            .receive_id(chat_id)
             .msg_type("text")
-            .content(json.dumps({"text": str(message.payload.get("text", ""))}, ensure_ascii=False))
-            .uuid(message.id)
+            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .uuid(uuid)
             .build()
         )
         request = (
             CreateMessageRequest.builder().receive_id_type("chat_id").request_body(body).build()
         )
-        response = self._client.im.v1.message.create(request)
-        if not response.success():
-            request_id = response.get_log_id() if hasattr(response, "get_log_id") else "unknown"
-            raise RuntimeError(
-                f"Feishu message API failed: code={response.code}, msg={response.msg}, request_id={request_id}"
-            )
+        self._check(self._client.im.v1.message.create(request))
+
+    def _reply(self, message_id: str, text: str, in_thread: bool, uuid: str) -> None:
+        from lark_oapi.api.im.v1.model.reply_message_request import ReplyMessageRequest
+        from lark_oapi.api.im.v1.model.reply_message_request_body import ReplyMessageRequestBody
+
+        body = (
+            ReplyMessageRequestBody.builder()
+            .msg_type("text")
+            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .uuid(uuid)
+            .reply_in_thread(in_thread)
+            .build()
+        )
+        request = ReplyMessageRequest.builder().message_id(message_id).request_body(body).build()
+        self._check(self._client.im.v1.message.reply(request))
+
+    @staticmethod
+    def _check(response) -> None:
+        if response.success():
+            return
+        request_id = response.get_log_id() if hasattr(response, "get_log_id") else "unknown"
+        raise FeishuApiError(response.code, response.msg, request_id)
 
 
 def config_from_env(environ: Mapping[str, str]) -> Optional[FeishuConfig]:

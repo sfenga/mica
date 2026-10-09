@@ -534,76 +534,6 @@ Multica 的父子联动是状态驱动：`issue_child_event` 由数据库触发�
 
 ---
 
-## KI-008：飞书出站消息不落库、不进话题，回复 bot 受理/完成消息会误开新 Issue
-
-- **状态**：待设计
-- **优先级**：P1（用户高频动作触发静默错误：补充要求丢失且凭空多出无上下文的新 Issue）
-- **涉及模块**：飞书接入、Outbox 投递、IssueOrigin、评论路由；与 KI-001（问题二，Chat/Issue 模型）联动但可独立修复
-
-### 当前行为
-
-- `issue_origin` 只记录**用户首条消息**的 `message_id`（`mica/application/channels.py` `add_origin`）；飞书回复通过 `parent_id/root_id` 命中该记录才会接回原 Issue（`mica/integrations/feishu.py` `_on_message`）。
-- bot 的受理消息（`issue.accepted`/`comment.accepted`）与终态通知（TaskNotificationProjector）经 `FeishuMessageSender.send()` 以 `receive_id=chat_id` 发送群层面新消息，**响应中的 `message_id` 被直接丢弃**，且消息不在用户原消息的话题内。
-- 用户回复 bot 的受理/完成消息时，`parent_id = root_id = bot 消息 id`，`find_origin` 查不到 → `related_issue_id=None` → **创建新 Issue**。
-
-### 消息链
-
-```text
-用户发 M1 → 建 Issue I，origin 记 M1 ✅
-bot 发受理 B1（群层面新消息，id 不落库，不进 M1 的话题）✗
-用户回复 B1「另外只看昨天的数据」→ root_id=B1，查不到 → 新建 Issue J ✗
-```
-
-### 影响
-
-- 补充内容（通常是"对，另外只看昨天的"这类残句）被当成新任务的完整输入，派给默认 Agent 执行。
-- 真正在跑的原 Issue 永远收不到这条补充：无评论合并、无 successor task，全程静默。
-- 用户视角"我补充了要求"，系统视角"来了个没头没尾的新任务"，双向错误。
-
-### Multica 参照（本机源码，HEAD 2ea01ae）
-
-飞书事件的 message 对象带三个回指字段：`parent_id`（消息级，直接回复的那条）、`root_id`（消息级，回复链根消息）、`thread_id`（容器级，话题/topic id，形如 `omt_xxx`，仅话题内消息携带）。Multica 对 `thread_id` 有三层用法：
-
-1. **会话隔离键**：群内话题消息按 `chat_id:thread_id` 键控出独立 chat_session（`larkSessionRouting`），同一群里两个 @bot 话题不合并成一份对话记录；私聊忽略 thread_id，普通群仍按 chat_id。与 Slack 的 `channel:threadRoot` 同一模型。
-2. **话题级上下文窗口（fail-closed）**：@bot 触发消息在话题内时，最近上下文拉取用 `container_id_type=thread` 限定在该话题；返回项缺 `thread_id` 或不匹配直接丢弃，失败绝不回退到全群拉取（#5835，话题间内容互不可见）。
-3. **出站回复进原话题**：migration 122 给 `lark_chat_session_binding` 增加 `last_lark_message_id` / `last_lark_thread_id`，出站走 `/im/v1/messages/{id}/reply` + `reply_in_thread=true` 回到原话题，而非群层面发新消息。
-
-Mica 当前只读 `parent_id`/`root_id`，完全未使用 `thread_id`。
-
-### 期望方向
-
-**方案一（主推，不动表结构）：出站消息回复进原话题。**
-
-- 受理 Outbox：创建时 origin 已写入，payload 带 `reply_to=command.external_message_id`（channels.py 152-164）。
-- 终态通知：Projector 已调用 `get_origin(task.issue_id)`，payload 带 `reply_to=origin.external_message_id`（channels.py 209-217）。
-- `FeishuMessageSender.send()`：payload 有 `reply_to` 时用 `im.v1.message.reply`，否则退回 chat 级 `create`；`uuid` 幂等参数两个接口都支持。
-- 效果：话题内所有消息 `root_id` 均为用户首条消息 M1，现有 `find_origin` 不改一行即可命中；同时形成"一个任务一个话题"的会话结构。
-- 一并把入站消息的 `thread_id`（若存在）记录到 origin 或绑定关系上：话题内消息的 `root_id` 链已可路由，但 `thread_id` 是更直接的容器级隔离键，提前持久化为 KI-001 的话题级 ChatSession 预留数据结构，避免二次迁移。
-
-**方案二（兜底加固）：出站消息 id 落库作为路由锚点。**
-
-- `send()` 返回飞书响应的 `message_id`；`outbox_message` 增加 `delivered_message_id` 列，`mark_outbox_sent` 时写入（Projector 路径需在 payload 补 `issue_id`）。
-- `ChannelRepository` 增加 `find_issue_by_outbound_message()`，`_on_message` 中 `find_origin` 未命中时回退查询。
-- 覆盖方案一不适用的场景（必须发群层面的通知、历史数据）。
-
-### 待决策项
-
-1. 是否一期只做方案一，方案二作为后续加固。
-2. 修复后受理文案是否提示"在本话题中回复可继续补充"。
-3. 群层面通知（非任务回传）是否也需要锚点落库。
-4. `thread_id` 的持久化位置：`issue_origin` 扩展列，还是等 KI-001 的 ChatSession 绑定表一并设计。
-
-### 验收条件
-
-- 模拟"回复受理消息"：同一 Issue 新增评论并按既有规则合并/排队，不创建新 Issue。
-- 模拟"回复完成消息"：同样接回原 Issue。
-- 话题内回复用户自己、回复 bot、回复话题中任意消息，路由结果一致。
-- 话题内消息（带 `thread_id`）与非话题消息的路由行为一致，且 `thread_id` 被持久化（若按待决策项 4 落地）。
-- 伪 sender 返回固定 message_id 即可覆盖，无需真实飞书环境。
-- 面试手册 07 篇"飞书只有 parent_id/root_id 命中已保存的来源消息才能接回 Issue"的边界陈述在修复后同步更新（注意"飞书追加路径不传 `parent_comment_id`、不解析 `agent=` 路由"的边界仍存在，见 KI-001 问题三、四）。
-
----
-
 ## KI-009：租约恢复与 queued 唯一索引冲突，已有后续任务时无法恢复过期执行
 
 - **状态**：待设计（已在 PostgreSQL 复现；2026-10-06 核对 Multica 方案并补充设计方向）
@@ -1047,3 +977,69 @@ INSERT 改为 `ON CONFLICT (runtime_id, provider) DO UPDATE`（`mica/infrastruct
 - 测试：`tests/test_runtime_discovery.py::test_concurrent_probe_replace_converges_without_unique_violation` 用两个真实 PostgreSQL 连接复现"一个事务保持 DELETE+INSERT 未提交，另一线程并发执行 replace"的交错。双向验证：旧代码下该测试抛出与线上一致的 UniqueViolation，修复后通过。
 - 全量测试 294 项通过（含 `MICA_TEST_DATABASE_URL` 指向的临时库的 PostgreSQL 集成测试）。
 - 内存仓储无此约束，不受影响；该问题原先未收录进本文档，本次直接以已完成条目补录。
+
+---
+
+## KI-008：飞书出站消息不落库、不进话题，回复 bot 受理/完成消息会误开新 Issue
+
+- **状态**：已完成（2026-10-09；方案一 + `thread_id` 落库，方案二留作可选加固，见待决策项）
+- **优先级**：P1（用户高频动作触发静默错误：补充要求丢失且凭空多出无上下文的新 Issue）
+- **涉及模块**：飞书接入、Outbox 投递、IssueOrigin、评论路由；与 KI-001（问题二，Chat/Issue 模型）联动但可独立修复
+
+### 修复前行为
+
+- `issue_origin` 只记录**用户首条消息**的 `message_id`（`mica/application/channels.py` `add_origin`）；飞书回复通过 `parent_id/root_id` 命中该记录才会接回原 Issue（`mica/integrations/feishu.py` `_on_message`）。
+- bot 的受理消息（`issue.accepted`/`comment.accepted`）与终态通知（TaskNotificationProjector）经 `FeishuMessageSender.send()` 以 `receive_id=chat_id` 发送群层面新消息，**响应中的 `message_id` 被直接丢弃**，且消息不在用户原消息的话题内。
+- 用户回复 bot 的受理/完成消息时，`parent_id = root_id = bot 消息 id`，`find_origin` 查不到 → `related_issue_id=None` → **创建新 Issue**。
+
+### 消息链
+
+```text
+用户发 M1 → 建 Issue I，origin 记 M1 ✅
+bot 发受理 B1（群层面新消息，id 不落库，不进 M1 的话题）✗
+用户回复 B1「另外只看昨天的数据」→ root_id=B1，查不到 → 新建 Issue J ✗
+```
+
+### 影响
+
+- 补充内容（通常是"对，另外只看昨天的"这类残句）被当成新任务的完整输入，派给默认 Agent 执行。
+- 真正在跑的原 Issue 永远收不到这条补充：无评论合并、无 successor task，全程静默。
+- 用户视角"我补充了要求"，系统视角"来了个没头没尾的新任务"，双向错误。
+
+### Multica 参照（本机源码，HEAD 2ea01ae）
+
+飞书事件的 message 对象带三个回指字段：`parent_id`（消息级，直接回复的那条）、`root_id`（消息级，回复链根消息）、`thread_id`（容器级，话题/topic id，形如 `omt_xxx`，仅话题内消息携带）。Multica 对 `thread_id` 有三层用法：
+
+1. **会话隔离键**：群内话题消息按 `chat_id:thread_id` 键控出独立 chat_session（`larkSessionRouting`），同一群里两个 @bot 话题不合并成一份对话记录；私聊忽略 thread_id，普通群仍按 chat_id。与 Slack 的 `channel:threadRoot` 同一模型。
+2. **话题级上下文窗口（fail-closed）**：@bot 触发消息在话题内时，最近上下文拉取用 `container_id_type=thread` 限定在该话题；返回项缺 `thread_id` 或不匹配直接丢弃，失败绝不回退到全群拉取（#5835，话题间内容互不可见）。
+3. **出站回复进原话题**：migration 122 给 `lark_chat_session_binding` 增加 `last_lark_message_id` / `last_lark_thread_id`，出站走 `/im/v1/messages/{id}/reply` + `reply_in_thread=true` 回到原话题，而非群层面发新消息。
+
+### 修复方式（2026-10-09，按方案一实施）
+
+- **受理 Outbox 带 `reply_to`**：`IngressService.submit()` 两处 `add_outbox`（`issue.accepted` / `comment.accepted`）的 payload 增加 `reply_to=command.external_message_id` 与 `reply_in_thread=bool(command.thread_id)`（`mica/application/channels.py`）。
+- **终态通知带 `reply_to`**：`TaskNotificationProjector._project()` 的 payload 增加 `reply_to=origin.external_message_id` 与 `reply_in_thread=bool(origin.thread_id)`。
+- **发送端支持 reply**：`FeishuMessageSender.send()` 在 payload 含 `reply_to` 时走 `/im/v1/messages/{id}/reply`（话题场景 `reply_in_thread=true`），否则退回 chat 级 `create`；`uuid` 幂等参数两个接口一致。reply 失败仅在确定为"目标不可回复且未发送"的业务码（230011/230019/230050/230071/230072/230111，对齐 Multica `threadReplyUnsupportedCodes`）时回退 chat 级 `create`；限流、5xx、超时等模糊错误依旧抛错走 Outbox 退避重试，避免重复投递或把话题回复漏进主群。
+- **`thread_id` 落库**：migration 011 给 `issue_origin` 增加 `thread_id TEXT`；`_on_message` 透传 `message.thread_id` 到 `IngressCommand` 并写入 origin，为 KI-001 的话题级 ChatSession 预留数据结构。
+- 效果：bot 消息回复进用户首条消息的话题/引用链后，话题内所有消息的 `root_id` 均为用户首条消息，现有 `find_origin` 不改路由逻辑即可命中。
+
+### 待决策项
+
+1. ~~是否一期只做方案一，方案二作为后续加固。~~（已定：一期只做方案一。方案二"出站 message_id 落库作为路由锚点"留作可选加固，覆盖必须发群层面通知或历史数据的场景。）
+2. 修复后受理文案是否提示"在本话题中回复可继续补充"。（未做，文案现状不变。）
+3. 群层面通知（非任务回传）是否也需要锚点落库。（未做，随方案二一并评估。）
+4. ~~`thread_id` 的持久化位置。~~（已定：`issue_origin` 扩展列，migration 011。）
+
+### 验收条件
+
+- 模拟"回复受理消息"：同一 Issue 新增评论并按既有规则合并/排队，不创建新 Issue。（机制覆盖：受理消息回复进话题后 `root_id` 链命中 origin；路由行为由既有 `test_channel_reply_becomes_a_comment_instead_of_a_second_issue` 保持不回归。）
+- 模拟"回复完成消息"：同样接回原 Issue。（终态通知 payload 的 `reply_to` 由 `test_terminal_task_event_is_projected_to_feishu_outbox` 覆盖。）
+- 话题内回复用户自己、回复 bot、回复话题中任意消息，路由结果一致。（依赖飞书话题内 `root_id` 一致的机制，未做真实环境联调。）
+- 话题内消息（带 `thread_id`）与非话题消息的路由行为一致，且 `thread_id` 被持久化。（内存与 PostgreSQL 双仓储覆盖：`test_issue_acceptance_outbox_carries_reply_target_and_thread`、`test_feishu_webhook_persists_topic_thread_id_on_origin`、`test_postgres_origin_persists_thread_id_and_outbox_reply_target`。）
+- 伪 sender 返回固定 message_id 即可覆盖，无需真实飞书环境。（`test_sender_*` 四项：reply 路径、不可回复码回退、模糊错误不回退、无 reply_to 时 chat 级发送。）
+- ~~面试手册 07 篇边界陈述同步更新。~~（已更新；问题三、四的边界陈述保留。）
+
+### 完成记录
+
+- 2026-10-09：实施完成，待提交。改动文件：`mica/application/channels.py`、`mica/integrations/feishu.py`、`mica/domain/models.py`、`mica/infrastructure/database/channel_repository.py`、`mica/infrastructure/database/sql/011_origin_thread_id.{up,down}.sql`；测试见 `tests/test_channel_ingress.py`（新增 6 项）与 `tests/test_postgres_channels_integration.py`（新增 1 项）。
+- 验证：全量 Python 测试 316 项通过（含一次性 PostgreSQL 库的集成测试）；`ruff check mica` 通过；本次改动文件 `ruff format --check` 通过。
+- 残留边界：方案二（出站 message_id 落库回退查询）未实施；真实飞书话题联调未做。

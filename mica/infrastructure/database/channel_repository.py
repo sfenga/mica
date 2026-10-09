@@ -143,14 +143,16 @@ class PostgresChannelRepository:
         with self.database.connection() as connection:
             connection.execute(
                 """INSERT INTO issue_origin(
-                    issue_id, channel, tenant_key, conversation_id, external_message_id, created_at
-                ) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (issue_id) DO NOTHING""",
+                    issue_id, channel, tenant_key, conversation_id, external_message_id,
+                    thread_id, created_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (issue_id) DO NOTHING""",
                 (
                     origin.issue_id,
                     origin.channel,
                     origin.tenant_key,
                     origin.conversation_id,
                     origin.external_message_id,
+                    origin.thread_id,
                     origin.created_at,
                 ),
             )

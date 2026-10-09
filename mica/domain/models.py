@@ -187,6 +187,7 @@ class IssueOrigin:
     tenant_key: str
     conversation_id: str
     external_message_id: str
+    thread_id: Optional[str] = None
     created_at: datetime = field(default_factory=utc_now)
 
 

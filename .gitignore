@@ -12,3 +12,4 @@ lark_edits/
 .omc/
 .ruff_cache/
 .DS_Store
+.zcode/

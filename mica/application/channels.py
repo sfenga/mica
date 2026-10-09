@@ -36,6 +36,7 @@ class IngressCommand:
     event_type: str = "issue.created"
     external_message_id: str = ""
     related_issue_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
     def payload_hash(self) -> str:
         canonical = json.dumps(
@@ -123,6 +124,8 @@ class IngressService:
                             payload={
                                 "text": f"补充要求已加入：{issue.title}\nIssue: {issue.id}",
                                 "issue_id": issue.id,
+                                "reply_to": command.external_message_id,
+                                "reply_in_thread": bool(command.thread_id),
                             },
                         )
                     )
@@ -144,6 +147,7 @@ class IngressService:
                     tenant_key=command.tenant_key,
                     conversation_id=command.conversation_id,
                     external_message_id=command.external_message_id or command.external_event_id,
+                    thread_id=command.thread_id,
                 )
             )
             self.channels.attach_issue(
@@ -159,6 +163,8 @@ class IngressService:
                         payload={
                             "text": f"任务已受理：{issue.title}\nIssue: {issue.id}",
                             "issue_id": issue.id,
+                            "reply_to": command.external_message_id,
+                            "reply_in_thread": bool(command.thread_id),
                         },
                     )
                 )
@@ -222,7 +228,11 @@ class TaskNotificationProjector:
                 destination=origin.conversation_id,
                 source_event_id=event.id,
                 message_type=event.event_type,
-                payload={"text": self._text(event.event_type, task, event.payload)},
+                payload={
+                    "text": self._text(event.event_type, task, event.payload),
+                    "reply_to": origin.external_message_id,
+                    "reply_in_thread": bool(origin.thread_id),
+                },
             )
         )
         return 1
