@@ -132,16 +132,19 @@ test("Editor serializes atomic mentions with IDs and preserves line breaks", () 
 });
 
 test("Registry, board and issue module graphs load without a build step", async () => {
-  const [forms, registry, board, detail] = await Promise.all([
+  const [forms, registry, board, detail, chat] = await Promise.all([
     import("../mica/web/lib/forms.js"),
     import("../mica/web/lib/registry.js"),
     import("../mica/web/lib/board.js"),
     import("../mica/web/lib/issue-detail.js"),
+    import("../mica/web/lib/chat.js"),
   ]);
   assert.equal(typeof forms.showCreateIssue, "function");
   assert.equal(typeof registry.renderAgents, "function");
   assert.equal(typeof board.renderBoard, "function");
   assert.equal(typeof detail.mountIssue, "function");
+  assert.equal(typeof chat.mountChat, "function");
+  assert.equal(typeof chat.disposeChat, "function");
 });
 
 test("Comment threads keep nested replies, missing parents and cycles exactly once", async () => {

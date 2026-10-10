@@ -204,6 +204,7 @@ class ChatSession:
     creator_user_id: str
     title: str = ""
     status: str = "active"
+    pinned: bool = False
     session_id: Optional[str] = None
     runtime_id: Optional[str] = None
     work_dir: Optional[str] = None

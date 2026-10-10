@@ -22,8 +22,39 @@ class InMemoryChatRepository:
         self._sessions: Dict[str, ChatSession] = {}
         self._bindings: Dict[str, ChannelChatBinding] = {}
         self._messages: List[ChatMessage] = []
+        self._reads: Dict[tuple, datetime] = {}
         self._tasks = tasks
         self._lock = RLock()
+
+    def add_session(self, session: ChatSession) -> ChatSession:
+        with self._lock:
+            self._sessions.setdefault(session.id, deepcopy(session))
+            return deepcopy(self._sessions[session.id])
+
+    def list_sessions(self, workspace_id: str) -> List[ChatSession]:
+        with self._lock:
+            return deepcopy([s for s in self._sessions.values() if s.workspace_id == workspace_id])
+
+    def mark_read(self, session_id: str, user_id: str, read_at: datetime) -> None:
+        with self._lock:
+            self._reads[(session_id, user_id)] = max(
+                read_at, self._reads.get((session_id, user_id), read_at)
+            )
+
+    def read_at(self, session_id: str, user_id: str) -> Optional[datetime]:
+        with self._lock:
+            return self._reads.get((session_id, user_id))
+
+    def delete_session(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+            self._messages = [m for m in self._messages if m.chat_session_id != session_id]
+            self._bindings = {
+                k: b for k, b in self._bindings.items() if b.chat_session_id != session_id
+            }
+            self._reads = {k: v for k, v in self._reads.items() if k[0] != session_id}
+            if self._tasks is not None:
+                self._tasks.delete_for_chat(session_id)
 
     def ensure_session(
         self,
@@ -116,6 +147,7 @@ class InMemoryChatRepository:
         with self._lock:
             duplicate = any(
                 item.chat_session_id == message.chat_session_id
+                and message.external_message_id is not None
                 and item.external_message_id == message.external_message_id
                 for item in self._messages
             )
@@ -123,7 +155,11 @@ class InMemoryChatRepository:
                 return deepcopy(message), False
             self._messages.append(deepcopy(message))
             binding = self.binding_for_session(message.chat_session_id)
-            if binding is not None and message.external_message_id is not None:
+            if (
+                binding is not None
+                and message.channel_ingested
+                and message.external_message_id is not None
+            ):
                 stored = self._bindings[binding.id]
                 stored.last_message_id = message.external_message_id
                 stored.last_thread_id = message.external_message_id
@@ -147,6 +183,41 @@ class InMemoryChatRepository:
             if limit is not None:
                 items = items[-limit:]
             return deepcopy(items)
+
+    def message_page(self, session_id: str, before: Optional[str], limit: int):
+        messages = self.list_messages(session_id)
+        if before:
+            index = next((i for i, m in enumerate(messages) if m.id == before), None)
+            if index is None:
+                raise KeyError(before)
+            messages = messages[:index]
+        return messages[-limit:], len(messages) > limit
+
+    def find_message(self, session_id: str, external_id: str) -> Optional[ChatMessage]:
+        with self._lock:
+            return deepcopy(
+                next(
+                    (
+                        m
+                        for m in self._messages
+                        if m.chat_session_id == session_id and m.external_message_id == external_id
+                    ),
+                    None,
+                )
+            )
+
+    def message_summary(self, session_id: str, user_id: str):
+        messages = self.list_messages(session_id)
+        read_at = self.read_at(session_id, user_id)
+        last = messages[-1] if messages else None
+        return {
+            "last_message": last.body if last else "",
+            "last_message_at": last.created_at if last else None,
+            "unread_count": sum(
+                m.role == "assistant" and (read_at is None or m.created_at > read_at)
+                for m in messages
+            ),
+        }
 
     def input_messages(self, chat_input_task_id: str) -> List[ChatMessage]:
         with self._lock:

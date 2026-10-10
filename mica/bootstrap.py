@@ -176,7 +176,7 @@ def build_memory_container(
     squads = InMemorySquadRepository()
     event_bus = EventBus()
 
-    transactions = MemoryTransactionManager([issues, tasks, events, channels, squads])
+    transactions = MemoryTransactionManager([issues, tasks, events, channels, squads, chats])
     issue_service = IssueService(issues, transactions=transactions)
     task_service = TaskService(
         tasks, issues, events, event_bus, transactions=transactions, chats=chats

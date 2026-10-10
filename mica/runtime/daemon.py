@@ -368,9 +368,22 @@ class Daemon:
             raise ChatInputUnavailable(
                 f"task {task.id} has no sealed input batch (chat_input_task_id={input_task_id})"
             )
-        transcript = self.chats.list_messages(
-            session.id, limit=self.chat_transcript_limit, exclude_task_id=input_task_id
-        )
+        # A queued future turn must never leak into the current prompt. Earlier
+        # assistant replies may arrive after this task was queued, so compare
+        # task order rather than message timestamps.
+        prior_task_ids = {
+            item.id
+            for item in self.tasks.tasks.list()
+            if item.chat_session_id == session.id
+            and item.id != input_task_id
+            and item.status != TaskStatus.CANCELLED
+            and (item.created_at, item.id) < (task.created_at, task.id)
+        }
+        transcript = [
+            message
+            for message in self.chats.list_messages(session.id)
+            if message.task_id in prior_task_ids
+        ][-self.chat_transcript_limit :]
         prompt = build_chat_prompt(session, transcript, batch)
         workdir = session.work_dir
         if workdir is None or not Path(workdir).exists():

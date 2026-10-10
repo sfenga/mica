@@ -207,6 +207,10 @@ class TaskService:
 
     def request_cancel(self, task_id: str) -> Task:
         with self._transaction():
+            existing = self.tasks.get(task_id)
+            if existing and existing.chat_session_id and self.chats is not None:
+                if self.chats.get_session_for_update(existing.chat_session_id) is None:
+                    raise NotFoundError(f"chat session not found: {existing.chat_session_id}")
             task = self.tasks.request_cancel(task_id)
             if task is None:
                 raise NotFoundError(f"task not found: {task_id}")
@@ -486,6 +490,9 @@ class TaskService:
             raise NotFoundError(f"task not found: {task_id}")
         if existing.issue_id is not None:
             self._get_issue(existing.issue_id, for_update=True)
+        elif existing.chat_session_id is not None and self.chats is not None:
+            if self.chats.get_session_for_update(existing.chat_session_id) is None:
+                raise NotFoundError(f"chat session not found: {existing.chat_session_id}")
         task = self.tasks.get_for_update(task_id)
         if task is None:
             raise NotFoundError(f"task not found: {task_id}")

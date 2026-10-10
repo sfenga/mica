@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 
@@ -25,3 +26,12 @@ class WorkspaceManager:
         path = self.root / "chats" / key / "workdir"
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
+
+    def remove_chat(self, chat_session_id: str) -> None:
+        """Remove only the directory derived from an owned conversation ID."""
+        key = hashlib.sha256(chat_session_id.encode()).hexdigest()[:24]
+        path = self.root / "chats" / key
+        if path.exists():
+            if path.is_symlink() or not path.resolve().is_relative_to(self.root):
+                raise ValueError("chat workspace is outside the managed root")
+            shutil.rmtree(path)

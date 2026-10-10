@@ -111,3 +111,23 @@ class UpdateSquadRequest(BaseModel):
     leader_agent_id: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=1000)
     instructions: str = Field(default="", max_length=5000)
+
+
+class SendChatMessageRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=100000)
+    request_id: str = Field(min_length=1, max_length=128)
+
+
+class CreateChatSessionRequest(SendChatMessageRequest):
+    agent_id: str = Field(min_length=1)
+    workspace_id: str = Field(default="local", min_length=1)
+
+
+class UpdateChatSessionRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+
+
+class ReadChatRequest(BaseModel):
+    message_id: str = Field(min_length=1)

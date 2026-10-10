@@ -13,6 +13,7 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     WebSocket,
@@ -24,18 +25,23 @@ from fastapi.staticfiles import StaticFiles
 
 from mica.application import IdempotencyConflictError, IngressCommand
 from mica.application.services import InvalidStateError, NotFoundError
+from mica.application.web_chat import WebChatService
 from mica.bootstrap import ApplicationContainer, build_container_from_env
 from mica.domain import Agent, Runtime, TaskStatus
 
 from .schemas import (
     CreateAgentRequest,
+    CreateChatSessionRequest,
     CreateCommentRequest,
     CreateIssueRequest,
     CreateProjectRequest,
     CreateRuntimeRequest,
     CreateSquadRequest,
+    ReadChatRequest,
     RunDaemonResponse,
+    SendChatMessageRequest,
     SquadMemberRequest,
+    UpdateChatSessionRequest,
     UpdateIssueStatusRequest,
     UpdateProjectRequest,
     UpdateRuntimeRequest,
@@ -74,6 +80,7 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
 
     app = FastAPI(title="Mica", version="0.5.0", lifespan=lifespan)
     app.state.container = state
+    chat = WebChatService(state)
     web_root = files("mica.web")
     app.mount("/assets", StaticFiles(directory=str(web_root)), name="web-assets")
 
@@ -110,6 +117,127 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
     @app.get("/app", response_class=HTMLResponse)
     def web_console() -> str:
         return files("mica.web").joinpath("index.html").read_text(encoding="utf-8")
+
+    @app.exception_handler(NotFoundError)
+    async def not_found_handler(request: Request, exc: NotFoundError):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidStateError)
+    async def invalid_state_handler(request: Request, exc: InvalidStateError):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.get("/api/chat/sessions")
+    def list_chat_sessions(
+        workspace_id: str = "local",
+        user_id: str = Header(default="local-user", alias="X-Mica-User"),
+    ):
+        return chat.list(workspace_id, user_id)
+
+    @app.post("/api/chat/sessions", status_code=201)
+    def create_chat_session(
+        request: CreateChatSessionRequest,
+        response: Response,
+        user_id: str = Header(default="local-user", alias="X-Mica-User"),
+    ):
+        try:
+            result = chat.send(
+                request.body,
+                request.request_id,
+                user_id,
+                request.workspace_id,
+                agent_id=request.agent_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not result["created"]:
+            response.status_code = 200
+        return result
+
+    @app.get("/api/chat/sessions/{session_id}")
+    def get_chat_session(
+        session_id: str,
+        workspace_id: str = "local",
+        user_id: str = Header(default="local-user", alias="X-Mica-User"),
+    ):
+        return chat.document(chat.get(session_id, workspace_id), user_id)
+
+    @app.patch("/api/chat/sessions/{session_id}")
+    def update_chat_session(
+        session_id: str, request: UpdateChatSessionRequest, workspace_id: str = "local"
+    ):
+        try:
+            return _document(chat.update(session_id, workspace_id, **request.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.delete("/api/chat/sessions/{session_id}", status_code=204)
+    def delete_chat_session(session_id: str, workspace_id: str = "local"):
+        chat.delete(session_id, workspace_id)
+        return Response(status_code=204)
+
+    @app.post("/api/chat/sessions/{session_id}/messages", status_code=201)
+    def send_chat_message(
+        session_id: str,
+        request: SendChatMessageRequest,
+        response: Response,
+        workspace_id: str = "local",
+        user_id: str = Header(default="local-user", alias="X-Mica-User"),
+    ):
+        try:
+            result = chat.send(
+                request.body, request.request_id, user_id, workspace_id, session_id=session_id
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not result["created"]:
+            response.status_code = 200
+        return result
+
+    @app.get("/api/chat/sessions/{session_id}/messages")
+    def list_chat_messages(
+        session_id: str,
+        workspace_id: str = "local",
+        before: Optional[str] = None,
+        limit: int = Query(default=50, ge=1, le=100),
+    ):
+        chat.get(session_id, workspace_id)
+        try:
+            page, has_more = state.chats.message_page(session_id, before, limit)
+        except KeyError as exc:
+            raise NotFoundError("分页游标不存在") from exc
+        return {
+            "messages": [_document(m) for m in page],
+            "tasks": [
+                _document(t) for t in chat.tasks(session_id) if t.id in {m.task_id for m in page}
+            ],
+            "has_more": has_more,
+            "next_cursor": page[0].id if has_more else None,
+        }
+
+    @app.get("/api/chat/sessions/{session_id}/pending-tasks")
+    def pending_chat_tasks(session_id: str, workspace_id: str = "local"):
+        chat.get(session_id, workspace_id)
+        return [
+            _document(t)
+            for t in chat.tasks(session_id)
+            if t.status
+            in {
+                TaskStatus.QUEUED,
+                TaskStatus.DISPATCHED,
+                TaskStatus.RUNNING,
+                TaskStatus.WAITING_INPUT,
+            }
+        ]
+
+    @app.post("/api/chat/sessions/{session_id}/read", status_code=204)
+    def read_chat_session(
+        session_id: str,
+        request: ReadChatRequest,
+        workspace_id: str = "local",
+        user_id: str = Header(default="local-user", alias="X-Mica-User"),
+    ):
+        chat.mark_read(session_id, workspace_id, user_id, request.message_id)
+        return Response(status_code=204)
 
     @app.post("/api/issues", status_code=201)
     def create_issue(

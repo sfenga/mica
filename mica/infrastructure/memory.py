@@ -238,6 +238,10 @@ class InMemoryTaskRepository:
                     recovered.append(deepcopy(task))
         return recovered
 
+    def delete_for_chat(self, session_id: str) -> None:
+        with self._lock:
+            self._items = {k: t for k, t in self._items.items() if t.chat_session_id != session_id}
+
     def delete_for_issue(self, issue_id: str) -> None:
         with self._lock:
             self._items = {

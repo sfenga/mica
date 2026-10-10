@@ -139,6 +139,16 @@ class ChatRepository(Protocol):
     translated by implementations.
     """
 
+    def add_session(self, session: ChatSession) -> ChatSession: ...
+
+    def list_sessions(self, workspace_id: str) -> List[ChatSession]: ...
+
+    def mark_read(self, session_id: str, user_id: str, read_at: datetime) -> None: ...
+
+    def read_at(self, session_id: str, user_id: str) -> Optional[datetime]: ...
+
+    def delete_session(self, session_id: str) -> None: ...
+
     def ensure_session(
         self,
         workspace_id: str,
@@ -184,6 +194,12 @@ class ChatRepository(Protocol):
     ) -> List[ChatMessage]:
         """Chronological transcript (both roles, channel commands excluded)."""
         ...
+
+    def message_page(self, session_id: str, before: Optional[str], limit: int): ...
+
+    def find_message(self, session_id: str, external_id: str) -> Optional[ChatMessage]: ...
+
+    def message_summary(self, session_id: str, user_id: str): ...
 
     def input_messages(self, chat_input_task_id: str) -> List[ChatMessage]:
         """The user batch sealed to a task — exactly what this turn consumes."""

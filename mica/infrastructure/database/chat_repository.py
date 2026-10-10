@@ -9,7 +9,7 @@ from .connection import PostgresDatabase
 
 CHAT_SESSION_COLUMNS = """
 id, workspace_id, title, status, agent_id, creator_user_id,
-session_id, runtime_id, work_dir, created_at, updated_at
+session_id, runtime_id, work_dir, created_at, updated_at, pinned
 """
 
 CHAT_BINDING_COLUMNS = """
@@ -35,6 +35,7 @@ def _session(row) -> ChatSession:
         creator_user_id=row["creator_user_id"],
         title=row["title"],
         status=row["status"],
+        pinned=row["pinned"],
         session_id=row["session_id"],
         runtime_id=row["runtime_id"],
         work_dir=row["work_dir"],
@@ -79,6 +80,57 @@ class PostgresChatRepository:
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
 
+    def add_session(self, session: ChatSession) -> ChatSession:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                f"INSERT INTO chat_session ({CHAT_SESSION_COLUMNS}) VALUES ({', '.join(['%s'] * 12)}) "
+                f"ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id RETURNING {CHAT_SESSION_COLUMNS}",
+                (
+                    session.id,
+                    session.workspace_id,
+                    session.title,
+                    session.status,
+                    session.agent_id,
+                    session.creator_user_id,
+                    session.session_id,
+                    session.runtime_id,
+                    session.work_dir,
+                    session.created_at,
+                    session.updated_at,
+                    session.pinned,
+                ),
+            ).fetchone()
+        return _session(row)
+
+    def list_sessions(self, workspace_id: str) -> List[ChatSession]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"SELECT {CHAT_SESSION_COLUMNS} FROM chat_session WHERE workspace_id=%s",
+                (workspace_id,),
+            ).fetchall()
+        return [_session(row) for row in rows]
+
+    def mark_read(self, session_id: str, user_id: str, read_at: datetime) -> None:
+        with self.database.connection() as connection:
+            connection.execute(
+                "INSERT INTO chat_read_cursor VALUES (%s, %s, %s) "
+                "ON CONFLICT (chat_session_id, user_id) DO UPDATE "
+                "SET read_at=GREATEST(chat_read_cursor.read_at, EXCLUDED.read_at)",
+                (session_id, user_id, read_at),
+            )
+
+    def read_at(self, session_id: str, user_id: str) -> Optional[datetime]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT read_at FROM chat_read_cursor WHERE chat_session_id=%s AND user_id=%s",
+                (session_id, user_id),
+            ).fetchone()
+        return row["read_at"] if row else None
+
+    def delete_session(self, session_id: str) -> None:
+        with self.database.connection() as connection:
+            connection.execute("DELETE FROM chat_session WHERE id=%s", (session_id,))
+
     def ensure_session(
         self,
         workspace_id: str,
@@ -106,7 +158,7 @@ class PostgresChatRepository:
             )
             connection.execute(
                 f"""INSERT INTO chat_session ({CHAT_SESSION_COLUMNS})
-                VALUES ({", ".join(["%s"] * 11)})""",
+                VALUES ({", ".join(["%s"] * 12)})""",
                 (
                     session.id,
                     session.workspace_id,
@@ -119,6 +171,7 @@ class PostgresChatRepository:
                     session.work_dir,
                     session.created_at,
                     session.updated_at,
+                    session.pinned,
                 ),
             )
             binding = ChannelChatBinding(
@@ -195,7 +248,7 @@ class PostgresChatRepository:
         with self.database.connection() as connection:
             connection.execute(
                 """UPDATE chat_session SET title=%s, status=%s, session_id=%s,
-                runtime_id=%s, work_dir=%s, updated_at=%s WHERE id=%s""",
+                runtime_id=%s, work_dir=%s, updated_at=%s, pinned=%s WHERE id=%s""",
                 (
                     session.title,
                     session.status,
@@ -203,6 +256,7 @@ class PostgresChatRepository:
                     session.runtime_id,
                     session.work_dir,
                     session.updated_at,
+                    session.pinned,
                     session.id,
                 ),
             )
@@ -238,7 +292,7 @@ class PostgresChatRepository:
             ).fetchone()
             if row is None:
                 return message, False
-            if message.external_message_id is not None:
+            if message.channel_ingested and message.external_message_id is not None:
                 connection.execute(
                     """UPDATE channel_chat_binding SET last_message_id=%s, last_thread_id=%s,
                     updated_at=now() WHERE chat_session_id=%s""",
@@ -269,6 +323,54 @@ class PostgresChatRepository:
         with self.database.connection() as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [_message(row) for row in reversed(rows)]
+
+    def message_page(self, session_id: str, before: Optional[str], limit: int):
+        query = f"SELECT {CHAT_MESSAGE_COLUMNS} FROM chat_message "
+        query += "WHERE chat_session_id=%s AND message_kind <> 'channel_command'"
+        params = [session_id]
+        with self.database.connection() as connection:
+            if before:
+                cursor = connection.execute(
+                    "SELECT created_at, id FROM chat_message WHERE id=%s AND chat_session_id=%s",
+                    (before, session_id),
+                ).fetchone()
+                if cursor is None:
+                    raise KeyError(before)
+                query += " AND (created_at, id) < (%s, %s)"
+                params.extend([cursor["created_at"], cursor["id"]])
+            query += " ORDER BY created_at DESC, id DESC LIMIT %s"
+            params.append(limit + 1)
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [_message(row) for row in reversed(rows[:limit])], len(rows) > limit
+
+    def find_message(self, session_id: str, external_id: str) -> Optional[ChatMessage]:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                f"SELECT {CHAT_MESSAGE_COLUMNS} FROM chat_message "
+                "WHERE chat_session_id=%s AND external_message_id=%s",
+                (session_id, external_id),
+            ).fetchone()
+        return _message(row) if row else None
+
+    def message_summary(self, session_id: str, user_id: str):
+        with self.database.connection() as connection:
+            last = connection.execute(
+                "SELECT body, created_at FROM chat_message WHERE chat_session_id=%s "
+                "AND message_kind <> 'channel_command' ORDER BY created_at DESC, id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            row = connection.execute(
+                "SELECT count(*) AS unread FROM chat_message m WHERE m.chat_session_id=%s "
+                "AND m.role='assistant' AND m.message_kind <> 'channel_command' "
+                "AND NOT EXISTS (SELECT 1 FROM chat_read_cursor r WHERE r.chat_session_id=m.chat_session_id "
+                "AND r.user_id=%s AND r.read_at >= m.created_at)",
+                (session_id, user_id),
+            ).fetchone()
+        return {
+            "last_message": last["body"] if last else "",
+            "last_message_at": last["created_at"] if last else None,
+            "unread_count": row["unread"],
+        }
 
     def input_messages(self, chat_input_task_id: str) -> List[ChatMessage]:
         with self.database.connection() as connection:

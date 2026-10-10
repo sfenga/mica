@@ -10,8 +10,13 @@ import {
   empty,
 } from "./lib/ui.js";
 import { state } from "./lib/state.js";
+import { mountChat, refreshChat, disposeChat } from "./lib/chat.js";
 import { api, loadData } from "./lib/api.js";
-import { mountIssue, refreshIssue, disposeIssue } from "./lib/issue-detail.js?v=delete-ui-v6";
+import {
+  mountIssue,
+  refreshIssue,
+  disposeIssue,
+} from "./lib/issue-detail.js?v=delete-ui-v6";
 
 import { renderBoard, configureBoard } from "./lib/board.js?v=delete-ui-v6";
 import {
@@ -68,9 +73,24 @@ function openIssue(id) {
 }
 async function setRoute() {
   const hash = location.hash.slice(1);
+  const isChat = hash === "chat" || hash.startsWith("chat/");
+  $("#page").classList.toggle("chat-page", isChat);
+  if (!isChat) disposeChat();
   $("#page").classList.toggle("issue-page", hash.startsWith("issue/"));
   $("#page").classList.toggle("board-page", !hash || hash === "board");
   closeDrawer();
+  if (isChat) {
+    disposeIssue();
+    state.selectedIssue = null;
+    state.route = "chat";
+    $("#primary-action").hidden = true;
+    document.title = "Chat · Mica";
+    $$("[data-route]").forEach((link) =>
+      link.classList.toggle("active", link.dataset.route === "chat"),
+    );
+    await mountChat();
+    return;
+  }
   if (hash.startsWith("issue/")) {
     let id;
     try {
@@ -109,7 +129,7 @@ async function setRoute() {
   render();
 }
 function render() {
-  if (state.route === "issue") return;
+  if (state.route === "issue" || state.route === "chat") return;
   const page = $("#page"),
     position =
       state.route === "board"
@@ -150,7 +170,8 @@ function closeDrawer() {
 
 async function refresh() {
   await loadData();
-  if (state.route === "issue") await refreshIssue();
+  if (state.route === "chat") await refreshChat();
+  else if (state.route === "issue") await refreshIssue();
   else render();
   checkHealth();
 }
@@ -210,10 +231,18 @@ $("#refresh-button").onclick = async () => {
 };
 $("#drawer-backdrop").onclick = closeDrawer;
 $("#modal-backdrop").addEventListener("pointerdown", (event) => {
-  if (event.target === event.currentTarget && event.currentTarget.dataset.confirmation) event.preventDefault();
+  if (
+    event.target === event.currentTarget &&
+    event.currentTarget.dataset.confirmation
+  )
+    event.preventDefault();
 });
 $("#modal-backdrop").addEventListener("click", (event) => {
-  if (event.target === $("#modal-backdrop") && !event.currentTarget.dataset.confirmation) closeModal();
+  if (
+    event.target === $("#modal-backdrop") &&
+    !event.currentTarget.dataset.confirmation
+  )
+    closeModal();
 });
 window.addEventListener("hashchange", setRoute);
 window.addEventListener("keydown", (event) => {

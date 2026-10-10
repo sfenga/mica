@@ -145,6 +145,10 @@ class ChatIngressService:
                 conversation_id=command.conversation_id,
                 thread_id=command.thread_id,
             )
+            session = self.chats.get_session_for_update(session.id)
+            if session.status == "archived":
+                session.status = "active"
+                self.chats.save_session(session)
             message, stored = self.chats.append_message(
                 ChatMessage(
                     chat_session_id=session.id,
@@ -271,14 +275,14 @@ class ChatIngressService:
             )
             task.chat_input_task_id = task.id
             # TaskService stays issue-only; the chat enqueue is a bare repo add
-            # inside this transaction, with the event recorded after commit.
+            # with its event inside this transaction.
             self.tasks.tasks.add(task)
             self.chats.seal_messages(chat_session_id, task.id)
-        self.tasks.record(
-            task.id,
-            "task.queued",
-            {"chat_session_id": chat_session_id, "runtime_id": agent.runtime_id},
-        )
+            self.tasks.record(
+                task.id,
+                "task.queued",
+                {"chat_session_id": chat_session_id, "runtime_id": agent.runtime_id},
+            )
         return task
 
     def recover_pending(self) -> None:

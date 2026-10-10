@@ -215,6 +215,13 @@ class TaskNotificationProjector:
         reply target was frozen onto the task at flush time."""
         if self.chats is None:
             return 0
+        if self.chats.get_session_for_update(task.chat_session_id) is None:
+            return 0
+        if self.tasks.get(task.id) is None:
+            return 0
+        inputs = self.chats.input_messages(task.chat_input_task_id or task.id)
+        if not any(message.channel_ingested for message in inputs):
+            return 0
         binding = self.chats.binding_for_session(task.chat_session_id)
         if binding is None or binding.channel != "feishu":
             return 0
