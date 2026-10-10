@@ -6,6 +6,9 @@ from typing import List, Optional, Protocol, Tuple
 
 from mica.domain import (
     Agent,
+    ChannelChatBinding,
+    ChatMessage,
+    ChatSession,
     ExternalEvent,
     ExternalIdentity,
     Issue,
@@ -126,6 +129,103 @@ class ChannelRepository(Protocol):
         self, message_id: str, worker_id: str, error: str, delay_seconds: int
     ) -> bool: ...
     def fail_outbox(self, message_id: str, worker_id: str, error: str) -> bool: ...
+
+
+class ChatRepository(Protocol):
+    """Conversation storage for the chat model (engine-facing, channel-agnostic).
+
+    thread_id uses '' (not None) as the non-topic sentinel inside the binding
+    key so the composite uniqueness is total; Optional on the domain object is
+    translated by implementations.
+    """
+
+    def ensure_session(
+        self,
+        workspace_id: str,
+        agent_id: str,
+        creator_user_id: str,
+        channel: str,
+        tenant_key: str,
+        conversation_id: str,
+        thread_id: Optional[str],
+    ) -> Tuple[ChatSession, bool]:
+        """Return (session, created); concurrent first messages converge on the
+        unique binding — the loser re-reads the winner's session."""
+        ...
+
+    def get_session(self, chat_session_id: str) -> Optional[ChatSession]: ...
+
+    def find_session(
+        self,
+        channel: str,
+        tenant_key: str,
+        conversation_id: str,
+        thread_id: Optional[str],
+    ) -> Optional[ChatSession]:
+        """Read-only binding lookup (no creation)."""
+        ...
+
+    def get_session_for_update(self, chat_session_id: str) -> Optional[ChatSession]: ...
+
+    def save_session(self, session: ChatSession) -> ChatSession: ...
+
+    def binding_for_session(self, chat_session_id: str) -> Optional[ChannelChatBinding]: ...
+
+    def append_message(self, message: ChatMessage) -> Tuple[ChatMessage, bool]:
+        """Insert a message; (message, created). Duplicate external ids are a
+        no-op returning created=False — inbound events may be redelivered."""
+        ...
+
+    def list_messages(
+        self,
+        chat_session_id: str,
+        limit: Optional[int] = None,
+        exclude_task_id: Optional[str] = None,
+    ) -> List[ChatMessage]:
+        """Chronological transcript (both roles, channel commands excluded)."""
+        ...
+
+    def input_messages(self, chat_input_task_id: str) -> List[ChatMessage]:
+        """The user batch sealed to a task — exactly what this turn consumes."""
+        ...
+
+    def unowned_messages(self, chat_session_id: str) -> List[ChatMessage]:
+        """User text messages not yet sealed to a task."""
+        ...
+
+    def seal_messages(self, chat_session_id: str, task_id: str) -> List[ChatMessage]:
+        """Tag the session's unowned user messages with the task and return them."""
+        ...
+
+    def skip_messages(self, chat_session_id: str) -> int:
+        """Consume unowned user messages without a run (bound agent gone):
+        tag them with a synthetic 'skipped_*' task id so crash recovery will
+        not resurrect the batch."""
+        ...
+
+    def sessions_with_unowned_messages(self) -> List[str]: ...
+
+    def append_assistant(self, chat_session_id: str, task_id: str, body: str) -> ChatMessage: ...
+
+    def pin_session(
+        self,
+        chat_session_id: str,
+        session_id: str,
+        runtime_id: str,
+        work_dir: Optional[str],
+        task_created_at: datetime,
+        exclude_task_id: str,
+    ) -> bool:
+        """Write back the daemon-owned triple (session_id/runtime_id/work_dir);
+        a newer task that already owns the pointer wins — a straggler never
+        drags the conversation backwards."""
+        ...
+
+    def last_session_pointer(self, chat_session_id: str, runtime_id: str) -> Optional[str]:
+        """The provider session id from the most recent task row that recorded
+        one for this chat — the resume fallback when the session pointer is
+        missing or stale."""
+        ...
 
 
 class EventPublisher(Protocol):

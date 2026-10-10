@@ -37,15 +37,22 @@ def _default_api_url() -> str:
     return f"http://{host}:{port}"
 
 
-def build_child_env(issue: Issue, task: Task) -> Dict[str, str]:
+def build_child_env(
+    issue: Optional[Issue], task: Task, chat: Optional[ChatBrief] = None
+) -> Dict[str, str]:
     """Environment for the agent subprocess: task-scoped context channel variables.
 
     Prepends the interpreter's bin directory to PATH so the `mica-ctx` entry point
-    (installed alongside the daemon) is resolvable by the agent's shell.
+    (installed alongside the daemon) is resolvable by the agent's shell. Chat runs
+    carry a session id instead of an issue id — the mica-ctx channel is
+    issue-scoped and meaningless for conversations.
     """
     env = os.environ.copy()
     env["MICA_API_URL"] = os.environ.get("MICA_API_URL") or _default_api_url()
-    env["MICA_ISSUE_ID"] = issue.id
+    if issue is not None:
+        env["MICA_ISSUE_ID"] = issue.id
+    if chat is not None:
+        env["MICA_CHAT_SESSION_ID"] = chat.chat_session_id
     env["MICA_TASK_ID"] = task.id
     # TODO(auth): MICA_TASK_TOKEN is pass-through only; once the platform mints
     # task-scoped tokens, set one here and enforce it on the API side.
@@ -113,6 +120,16 @@ class ProviderCancelled(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ChatBrief:
+    """Chat-run payload: the daemon assembles the full prompt (transcript +
+    sealed input batch) and identifies the conversation; providers only ship
+    it — none of them rebuild a prompt from an issue."""
+
+    chat_session_id: str
+    prompt: str
+
+
+@dataclass(frozen=True)
 class ProviderRunResult:
     output: str
     session_id: Optional[str] = None
@@ -124,13 +141,14 @@ class AgentProvider(Protocol):
     def run(
         self,
         agent: Agent,
-        issue: Issue,
+        issue: Optional[Issue],
         task: Task,
         on_event: AgentEventHandler,
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
         replay_conflicts: Optional[List[str]] = None,
+        chat: Optional[ChatBrief] = None,
     ) -> ProviderRunResult: ...
 
 

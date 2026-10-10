@@ -387,6 +387,40 @@ Outbox 在项目里只服务一个方向：**飞书出站通知**。三个写入
 - **不用 LISTEN/NOTIFY**：任务唤醒是进程内 `Event`（daemon 轮询间隔 2 秒），跨进程通知尚未需要。
 - **不依赖 READ COMMITTED 以上的隔离级别**：所有并发正确性来自唯一约束、行锁和条件更新，而不是 Serializable。
 
+
+## 11. Chat 会话：全键组合唯一 + 任务形状分叉（migration 012）
+
+Chat 模型引入了三个此前没用过的组合姿势。
+
+**非哨兵不可的组合唯一键**：会话隔离键是 `(channel, tenant_key, conversation_id, thread_id)`，但 PostgreSQL 的 UNIQUE 把 NULL 视为彼此不同——两个"无话题"的普通群消息会各自建 binding，create/re-read 协议直接失效。解法是 `thread_id` 用 `''`（非 NULL）表示无话题，让组合唯一约束全键生效；领域对象上的 `Optional[str]` 由仓储翻译。这个取舍写在 `012_chat.up.sql` 头部注释里。
+
+**不用异常做并发收敛**：`ensure_session()` 先 SELECT 再 INSERT session，binding 用 `ON CONFLICT ... DO NOTHING RETURNING id`——RETURNING 为空说明并发对手赢了 binding，此时同事务 `DELETE` 掉刚插的败者 session、重读胜者。整条路径没有异常控制流，也不需要嵌套事务回滚（对比 `reserve_event` 的异常转译风格：那里冲突本身是业务信号，这里冲突只是重试一次的读路径）。
+
+**消息级去重下沉到表约束**：`chat_message` 上 `UNIQUE (chat_session_id, external_message_id)`，append 用 `ON CONFLICT DO NOTHING RETURNING` 判断是否新消息。飞书事件重推的全部幂等性由这一个约束承担——不需要独立去重表，因为"同一条外部消息属于同一个会话"是模型事实。
+
+**任务形状分叉认领**：`claim_next()` 从 `JOIN issue` 改为 `LEFT JOIN issue` + `LEFT JOIN chat_session`，互斥子查询按形状分叉：
+
+```sql
+AND (
+    (queued.issue_id IS NOT NULL
+        AND owner_issue.status NOT IN ('done', 'cancelled'))
+    OR (queued.chat_session_id IS NOT NULL
+        AND owner_chat.status='active')
+)
+AND NOT EXISTS (
+    SELECT 1 FROM agent_task AS active
+    WHERE active.agent_id=queued.agent_id
+    AND active.status IN ('dispatched', 'running')
+    AND (
+        (queued.issue_id IS NOT NULL AND active.issue_id=queued.issue_id)
+        OR (queued.chat_session_id IS NOT NULL
+            AND active.chat_session_id=queued.chat_session_id)
+    )
+)
+```
+
+NULL ≠ NULL 语义保证两个分支互不误伤——这是把"任务来源判别"显式写进 SQL 的代价，也是收益。教训一条：`FOR UPDATE` 不能加在外连接的可空侧（`FOR UPDATE OF owner_issue` 直接报 FeatureNotSupported），且这里也不需要——done 守卫没有竞态窗口（`transition_issue(DONE)` 要求无 active 任务，queued 计入 active；CANCELLED 转移自己取消排队任务），锁任务行就够了。
+
 ## 速查表
 
 | 机制 | 语句位置 | 迁移 |
@@ -399,5 +433,7 @@ Outbox 在项目里只服务一个方向：**飞书出站通知**。三个写入
 | Outbox 领取 / 重试 | `channel_repository.py` `claim_outbox()` 等 | 003、005 |
 | Squad 批次临界区 | `repositories.py:109` `get_for_update()` + `application/squads.py` | 004 |
 | 迁移版本锁 | `migrations.py` | — |
+| Chat binding 竞态收敛 / 消息去重 | `chat_repository.py` `ensure_session()` / `append_message()` | 012 |
+| Chat 会话认领互斥 | `repositories.py` `claim_next()`（形状分叉） | 012 |
 
 相关文档：[架构基线](../architecture.md)、[已知问题](../known-issues.md)、[面试手册 01 多渠道触发与合并](../interview/01-multi-channel-trigger-and-merge.md)。

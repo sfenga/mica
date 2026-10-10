@@ -322,7 +322,7 @@ def test_feishu_only_receives_squad_level_completion_not_internal_task_completio
     container.channel_worker.projector.run_once()
     message_types = [message.message_type for message in container.channels.list_outbox()]
 
-    assert message_types == ["issue.accepted", "squad.completed"]
+    assert message_types == ["squad.completed"]
 
 
 def test_squad_member_prompt_carries_ctx_channel():

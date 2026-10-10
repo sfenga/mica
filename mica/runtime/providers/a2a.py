@@ -15,6 +15,7 @@ from mica.domain import Agent, Issue, Task
 from .base import (
     AgentEventHandler,
     CancellationCheck,
+    ChatBrief,
     ProviderCancelled,
     ProviderRunResult,
     build_task_prompt,
@@ -41,13 +42,14 @@ class A2aProvider:
     def run(
         self,
         agent: Agent,
-        issue: Issue,
+        issue: Optional[Issue],
         task: Task,
         on_event: AgentEventHandler,
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
         replay_conflicts: Optional[List[str]] = None,
+        chat: Optional[ChatBrief] = None,
     ) -> ProviderRunResult:
         config = agent.provider_config
         timeout = float(config.get("timeout_seconds", 300))
@@ -75,7 +77,7 @@ class A2aProvider:
             message: Dict[str, Any] = {
                 "messageId": str(uuid4()),
                 "role": "ROLE_USER",
-                "parts": [self._input_part(agent, issue, task)],
+                "parts": [self._input_part(agent, issue, task, chat=chat)],
             }
             if previous.get("context_id"):
                 message["contextId"] = previous["context_id"]
@@ -399,8 +401,13 @@ class A2aProvider:
         return "\n".join(str(part["text"]) for part in parts if "text" in part)
 
     @staticmethod
-    def _input_part(agent: Agent, issue: Issue, task: Task) -> Dict[str, Any]:
-        prompt = build_task_prompt(issue, task)
+    def _input_part(
+        agent: Agent,
+        issue: Optional[Issue],
+        task: Task,
+        chat: Optional[ChatBrief] = None,
+    ) -> Dict[str, Any]:
+        prompt = chat.prompt if chat is not None else build_task_prompt(issue, task)
         if agent.instructions:
             prompt = f"{agent.instructions}\n\n{prompt}"
         part: Dict[str, Any] = {"text": prompt}

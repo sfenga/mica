@@ -48,7 +48,9 @@ class Issue:
 
 @dataclass
 class Task:
-    issue_id: str
+    # Exactly one of issue_id / chat_session_id is set: issue tasks and chat
+    # tasks share the queue and lifecycle but not the business semantics.
+    issue_id: Optional[str]
     agent_id: str
     runtime_id: str
     trigger_type: str
@@ -60,6 +62,10 @@ class Task:
     trigger_comment_id: Optional[str] = None
     merged_comment_ids: List[str] = field(default_factory=list)
     delivered_comment_ids: List[str] = field(default_factory=list)
+    chat_session_id: Optional[str] = None
+    chat_input_task_id: Optional[str] = None
+    reply_to_message_id: Optional[str] = None
+    reply_in_thread: Optional[bool] = None
     id: str = field(default_factory=lambda: new_id("task"))
     status: TaskStatus = TaskStatus.QUEUED
     session_id: Optional[str] = None
@@ -188,6 +194,49 @@ class IssueOrigin:
     conversation_id: str
     external_message_id: str
     thread_id: Optional[str] = None
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class ChatSession:
+    workspace_id: str
+    agent_id: str
+    creator_user_id: str
+    title: str = ""
+    status: str = "active"
+    session_id: Optional[str] = None
+    runtime_id: Optional[str] = None
+    work_dir: Optional[str] = None
+    id: str = field(default_factory=lambda: new_id("chat"))
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class ChannelChatBinding:
+    channel: str
+    tenant_key: str
+    conversation_id: str
+    thread_id: Optional[str]
+    chat_session_id: str
+    last_message_id: Optional[str] = None
+    last_thread_id: Optional[str] = None
+    id: str = field(default_factory=lambda: new_id("binding"))
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class ChatMessage:
+    chat_session_id: str
+    role: str
+    body: str
+    external_message_id: Optional[str] = None
+    parent_external_message_id: Optional[str] = None
+    task_id: Optional[str] = None
+    message_kind: str = "text"
+    channel_ingested: bool = False
+    id: str = field(default_factory=lambda: new_id("chat_msg"))
     created_at: datetime = field(default_factory=utc_now)
 
 

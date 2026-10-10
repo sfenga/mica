@@ -17,6 +17,7 @@ from mica.domain import (
 
 from .ports import (
     AgentRepository,
+    ChatRepository,
     EventPublisher,
     EventRepository,
     IssueRepository,
@@ -124,12 +125,14 @@ class TaskService:
         events: EventRepository,
         publisher: Optional[EventPublisher] = None,
         transactions: Optional[TransactionManager] = None,
+        chats: Optional[ChatRepository] = None,
     ) -> None:
         self.tasks = tasks
         self.issues = issues
         self.events = events
         self.publisher = publisher
         self.transactions = transactions
+        self.chats = chats
 
     def _transaction(self):
         return self.transactions.transaction() if self.transactions is not None else nullcontext()
@@ -233,7 +236,7 @@ class TaskService:
             task.lease_expires_at = None
             task.updated_at = utc_now()
             self.tasks.save(task)
-            if advance_issue:
+            if advance_issue and task.issue_id is not None:
                 issue = self._get_issue(task.issue_id, for_update=True)
                 issue.status = IssueStatus.CANCELLED
                 issue.updated_at = utc_now()
@@ -299,6 +302,7 @@ class TaskService:
         task_id: str,
         worker_id: Optional[str] = None,
         attempt: Optional[int] = None,
+        advance_issue: bool = True,
     ) -> Task:
         with self._transaction():
             task = self._locked_task(task_id)
@@ -307,12 +311,51 @@ class TaskService:
             task.status = TaskStatus.RUNNING
             task.updated_at = utc_now()
             self.tasks.save(task)
-            issue = self._get_issue(task.issue_id, for_update=True)
-            issue.status = IssueStatus.IN_PROGRESS
-            issue.last_error = None
-            issue.updated_at = utc_now()
-            self.issues.save(issue)
+            if advance_issue and task.issue_id is not None:
+                issue = self._get_issue(task.issue_id, for_update=True)
+                issue.status = IssueStatus.IN_PROGRESS
+                issue.last_error = None
+                issue.updated_at = utc_now()
+                self.issues.save(issue)
             self.record(task.id, "task.started", {})
+        return task
+
+    def complete_chat(
+        self,
+        task_id: str,
+        output: str,
+        session_id: Optional[str] = None,
+        work_dir: Optional[str] = None,
+        worker_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> Task:
+        """Terminal write-back for a chat task: no issue is touched; the reply
+        lands in the transcript and the daemon-owned triple pins back to the
+        session inside the same transaction."""
+        with self._transaction():
+            task = self._locked_task(task_id)
+            self._require_owner(task, worker_id, attempt)
+            self._require(task, TaskStatus.RUNNING)
+            task.status = TaskStatus.COMPLETED
+            task.output = output
+            task.session_id = session_id
+            task.lease_expires_at = None
+            task.updated_at = utc_now()
+            self.tasks.save(task)
+            if self.chats is not None and task.chat_session_id is not None:
+                content = (output or "").strip()
+                if content:
+                    self.chats.append_assistant(task.chat_session_id, task.id, content)
+                if session_id:
+                    self.chats.pin_session(
+                        task.chat_session_id,
+                        session_id,
+                        task.runtime_id,
+                        work_dir,
+                        task.created_at,
+                        task.id,
+                    )
+            self.record(task.id, "task.completed", {"output": output, "session_id": session_id})
         return task
 
     def complete(
@@ -412,7 +455,7 @@ class TaskService:
             task.lease_expires_at = None
             task.updated_at = utc_now()
             self.tasks.save(task)
-            if advance_issue:
+            if advance_issue and task.issue_id is not None:
                 issue = self._get_issue(task.issue_id, for_update=True)
                 issue.status = IssueStatus.BLOCKED
                 issue.last_error = error
@@ -441,7 +484,8 @@ class TaskService:
         existing = self.tasks.get(task_id)
         if existing is None:
             raise NotFoundError(f"task not found: {task_id}")
-        self._get_issue(existing.issue_id, for_update=True)
+        if existing.issue_id is not None:
+            self._get_issue(existing.issue_id, for_update=True)
         task = self.tasks.get_for_update(task_id)
         if task is None:
             raise NotFoundError(f"task not found: {task_id}")

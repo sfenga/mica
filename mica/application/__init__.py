@@ -4,6 +4,14 @@ from .channels import (
     IngressService,
     TaskNotificationProjector,
 )
+from .chat import (
+    ChatBatcher,
+    ChatIngressCommand,
+    ChatIngressService,
+    build_chat_prompt,
+    chat_app_url,
+    resolve_chat_resume,
+)
 from .projects import ProjectCandidate, ProjectService
 from .runtimes import RuntimeDiscoveryService
 from .services import IssueService, TaskService, TriggerService
@@ -23,4 +31,10 @@ __all__ = [
     "TaskNotificationProjector",
     "TaskService",
     "TriggerService",
+    "ChatBatcher",
+    "ChatIngressCommand",
+    "ChatIngressService",
+    "build_chat_prompt",
+    "chat_app_url",
+    "resolve_chat_resume",
 ]

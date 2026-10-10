@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 from mica.application import (
+    ChatBatcher,
+    ChatIngressService,
     IngressService,
     IssueService,
     ProjectService,
@@ -31,6 +33,7 @@ from mica.domain import Agent, Runtime
 from mica.infrastructure import (
     InMemoryAgentRepository,
     InMemoryChannelRepository,
+    InMemoryChatRepository,
     InMemoryEventRepository,
     InMemoryIssueRepository,
     InMemoryProjectRepository,
@@ -42,6 +45,7 @@ from mica.infrastructure import (
 from mica.infrastructure.database import (
     PostgresAgentRepository,
     PostgresChannelRepository,
+    PostgresChatRepository,
     PostgresDatabase,
     PostgresEventRepository,
     PostgresIssueRepository,
@@ -54,7 +58,12 @@ from mica.infrastructure.database import (
 )
 from mica.infrastructure.memory_transaction import MemoryTransactionManager
 from mica.integrations import ChannelDeliveryWorker
-from mica.integrations.feishu import FeishuMessageSender, FeishuWebhook, config_from_env
+from mica.integrations.feishu import (
+    FeishuMessageSender,
+    FeishuTypingReceipt,
+    FeishuWebhook,
+    config_from_env,
+)
 from mica.realtime import DatabaseEventRelay, EventBus
 from mica.runtime import Daemon, DaemonWorker, RuntimeSlotPool, WorkspaceManager, WorktreeManager
 from mica.runtime.providers import (
@@ -95,6 +104,9 @@ class ApplicationContainer:
     workspaces: WorkspaceManager
     daemon: Daemon
     worker: DaemonWorker
+    chats: object
+    chat_ingress: ChatIngressService
+    chat_batcher: ChatBatcher
     database: Optional[PostgresDatabase] = None
     event_relay: Optional[DatabaseEventRelay] = None
 
@@ -140,6 +152,14 @@ def _positive_float(name: str, default: float) -> float:
     return value
 
 
+def _chat_window_seconds() -> float:
+    return _positive_float("MICA_CHAT_BATCH_WINDOW", 3.0)
+
+
+def _chat_transcript_limit() -> int:
+    return _positive_int("MICA_CHAT_TRANSCRIPT_LIMIT", 20)
+
+
 def build_memory_container(
     seed_defaults: bool = True, default_provider: str = "stub"
 ) -> ApplicationContainer:
@@ -147,6 +167,8 @@ def build_memory_container(
     tasks = InMemoryTaskRepository()
     events = InMemoryEventRepository()
     channels = InMemoryChannelRepository()
+    chats = InMemoryChatRepository(tasks=tasks)
+    tasks.attach_owner_stores(issues=issues, chats=chats)
     agents = InMemoryAgentRepository()
     runtimes = InMemoryRuntimeRepository()
     runtime_capabilities = InMemoryRuntimeCapabilityRepository()
@@ -156,7 +178,9 @@ def build_memory_container(
 
     transactions = MemoryTransactionManager([issues, tasks, events, channels, squads])
     issue_service = IssueService(issues, transactions=transactions)
-    task_service = TaskService(tasks, issues, events, event_bus, transactions=transactions)
+    task_service = TaskService(
+        tasks, issues, events, event_bus, transactions=transactions, chats=chats
+    )
     squad_service = SquadService(
         squads, agents, issues, tasks, task_service, transactions=transactions
     )
@@ -166,6 +190,11 @@ def build_memory_container(
     ingress_service = IngressService(
         channels, trigger_service, issue_service, transactions=transactions
     )
+    chat_ingress = ChatIngressService(
+        chats, channels, agents, trigger_service, task_service, transactions=transactions
+    )
+    chat_batcher = ChatBatcher(chat_ingress.flush_session, window_seconds=_chat_window_seconds())
+    chat_ingress.bind_batcher(chat_batcher)
     deletion_service = IssueDeletionService(issues, tasks, events, channels, transactions)
     providers = _provider_registry()
     slots = RuntimeSlotPool()
@@ -214,14 +243,19 @@ def build_memory_container(
         lease_seconds=_positive_int("MICA_LEASE_SECONDS", 120),
         heartbeat_seconds=_positive_int("MICA_HEARTBEAT_SECONDS", 30),
         squads=squad_service,
+        chats=chats,
+        chat_transcript_limit=_chat_transcript_limit(),
     )
     worker = DaemonWorker(daemon)
     feishu_config = config_from_env(os.environ)
-    senders = {"feishu": FeishuMessageSender(feishu_config)} if feishu_config else {}
+    receipt = FeishuTypingReceipt(feishu_config) if feishu_config else None
+    senders = (
+        {"feishu": FeishuMessageSender(feishu_config, receipt=receipt)} if feishu_config else {}
+    )
     channel_worker = ChannelDeliveryWorker(
         channels,
         TaskNotificationProjector(
-            events, tasks, channels, transactions=transactions, issues=issues
+            events, tasks, channels, transactions=transactions, issues=issues, chats=chats
         ),
         senders,
         max_attempts=_positive_int("MICA_CHANNEL_MAX_ATTEMPTS", 8),
@@ -246,13 +280,18 @@ def build_memory_container(
         channels=channels,
         ingress_service=ingress_service,
         channel_worker=channel_worker,
-        feishu_webhook=FeishuWebhook(feishu_config, ingress_service) if feishu_config else None,
+        feishu_webhook=(
+            FeishuWebhook(feishu_config, chat_ingress, receipt=receipt) if feishu_config else None
+        ),
         providers=providers,
         slots=slots,
         worktrees=worktrees,
         workspaces=workspaces,
         daemon=daemon,
         worker=worker,
+        chats=chats,
+        chat_ingress=chat_ingress,
+        chat_batcher=chat_batcher,
     )
 
 
@@ -265,6 +304,7 @@ def build_postgres_container(
     tasks = PostgresTaskRepository(database)
     events = PostgresEventRepository(database)
     channels = PostgresChannelRepository(database)
+    chats = PostgresChatRepository(database)
     agents = PostgresAgentRepository(database)
     runtimes = PostgresRuntimeRepository(database)
     runtime_capabilities = PostgresRuntimeCapabilityRepository(database)
@@ -275,7 +315,7 @@ def build_postgres_container(
     issue_service = IssueService(issues, transactions=database)
     # PostgreSQL events are published by DatabaseEventRelay after commit, so a
     # rolled-back transaction can never leak a realtime event.
-    task_service = TaskService(tasks, issues, events, transactions=database)
+    task_service = TaskService(tasks, issues, events, transactions=database, chats=chats)
     squad_service = SquadService(squads, agents, issues, tasks, task_service, transactions=database)
     trigger_service = TriggerService(
         issues,
@@ -288,6 +328,11 @@ def build_postgres_container(
     ingress_service = IngressService(
         channels, trigger_service, issue_service, transactions=database
     )
+    chat_ingress = ChatIngressService(
+        chats, channels, agents, trigger_service, task_service, transactions=database
+    )
+    chat_batcher = ChatBatcher(chat_ingress.flush_session, window_seconds=_chat_window_seconds())
+    chat_ingress.bind_batcher(chat_batcher)
     providers = _provider_registry()
     slots = RuntimeSlotPool()
     worktrees = _worktree_manager()
@@ -331,13 +376,20 @@ def build_postgres_container(
         lease_seconds=_positive_int("MICA_LEASE_SECONDS", 120),
         heartbeat_seconds=_positive_int("MICA_HEARTBEAT_SECONDS", 30),
         squads=squad_service,
+        chats=chats,
+        chat_transcript_limit=_chat_transcript_limit(),
     )
     worker = DaemonWorker(daemon, poll_interval=_positive_float("MICA_POLL_INTERVAL", 2))
     feishu_config = config_from_env(os.environ)
-    senders = {"feishu": FeishuMessageSender(feishu_config)} if feishu_config else {}
+    receipt = FeishuTypingReceipt(feishu_config) if feishu_config else None
+    senders = (
+        {"feishu": FeishuMessageSender(feishu_config, receipt=receipt)} if feishu_config else {}
+    )
     channel_worker = ChannelDeliveryWorker(
         channels,
-        TaskNotificationProjector(events, tasks, channels, transactions=database, issues=issues),
+        TaskNotificationProjector(
+            events, tasks, channels, transactions=database, issues=issues, chats=chats
+        ),
         senders,
         poll_interval=_positive_float("MICA_CHANNEL_POLL_INTERVAL", 2),
         max_attempts=_positive_int("MICA_CHANNEL_MAX_ATTEMPTS", 8),
@@ -362,13 +414,18 @@ def build_postgres_container(
         channels=channels,
         ingress_service=ingress_service,
         channel_worker=channel_worker,
-        feishu_webhook=FeishuWebhook(feishu_config, ingress_service) if feishu_config else None,
+        feishu_webhook=(
+            FeishuWebhook(feishu_config, chat_ingress, receipt=receipt) if feishu_config else None
+        ),
         providers=providers,
         slots=slots,
         worktrees=worktrees,
         workspaces=workspaces,
         daemon=daemon,
         worker=worker,
+        chats=chats,
+        chat_ingress=chat_ingress,
+        chat_batcher=chat_batcher,
         database=database,
         event_relay=DatabaseEventRelay(events, event_bus),
     )

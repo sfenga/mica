@@ -7,16 +7,23 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Dict, Optional
 
-from mica.application.ports import AgentRepository, IssueRepository
+from mica.application.chat import build_chat_prompt, resolve_chat_resume
+from mica.application.ports import AgentRepository, ChatRepository, IssueRepository
 from mica.application.services import InvalidStateError, NotFoundError, TaskService
 from mica.application.squads import SquadService
 from mica.domain import TaskStatus
 
-from .providers import ProviderCancelled, ProviderRegistry
+from .providers import ChatBrief, ProviderCancelled, ProviderRegistry
 from .workspace import WorkspaceManager
 from .worktree import WorktreeManager
 
 LOCAL_WORKDIR_PROVIDERS = {"codex", "claude", "pi", "acp"}
+
+
+class ChatInputUnavailable(RuntimeError):
+    """The chat batch could not be read: the task is preserved for redelivery
+    instead of executing on an empty input (a read failure must never
+    masquerade as zero input)."""
 
 
 class LocalDirectoryLockPool:
@@ -88,6 +95,8 @@ class Daemon:
         lease_seconds: int = 120,
         heartbeat_seconds: int = 30,
         squads: Optional[SquadService] = None,
+        chats: Optional[ChatRepository] = None,
+        chat_transcript_limit: int = 20,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -106,6 +115,8 @@ class Daemon:
         self.lease_seconds = lease_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.squads = squads
+        self.chats = chats
+        self.chat_transcript_limit = chat_transcript_limit
         self._shutdown = Event()
 
     def resume(self) -> None:
@@ -139,10 +150,12 @@ class Daemon:
                 daemon=True,
             )
             heartbeat_thread.start()
-            issue = self.issues.get(task.issue_id)
+            issue = None
+            if task.chat_session_id is None:
+                issue = self.issues.get(task.issue_id)
+                if issue is None:
+                    raise NotFoundError(f"issue not found: {task.issue_id}")
             agent = self.agents.get(task.agent_id)
-            if issue is None:
-                raise NotFoundError(f"issue not found: {task.issue_id}")
             if agent is None:
                 raise NotFoundError(f"agent not found: {task.agent_id}")
             if agent.runtime_id != self.runtime_id or task.runtime_id != agent.runtime_id:
@@ -150,6 +163,8 @@ class Daemon:
                     f"agent {agent.id} is now bound to runtime {agent.runtime_id}; "
                     f"daemon {self.worker_id} cannot execute task {task.id}"
                 )
+            if task.chat_session_id is not None:
+                return self._run_chat(task, agent, lease_lost)
             previous = self.tasks.previous_execution(task)
             prior_session_id = previous.session_id if previous is not None else None
             branch_name = previous.branch_name if previous is not None else None
@@ -283,6 +298,14 @@ class Daemon:
                         task.attempt,
                     )
             return True
+        except ChatInputUnavailable as exc:
+            # Preserve the task: a read failure must not masquerade as zero
+            # input. Leave it dispatched; lease expiry requeues for redelivery.
+            logging.getLogger(__name__).warning(
+                "chat input unavailable; task preserved for redelivery",
+                extra={"task_id": getattr(task, "id", None), "reason": str(exc)},
+            )
+            return True
         except ProviderCancelled:
             if prepared is not None:
                 self.worktrees.release(prepared)
@@ -330,6 +353,74 @@ class Daemon:
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=1)
             self.slots.release(self.runtime_id)
+
+    def _run_chat(self, task, agent, lease_lost) -> bool:
+        """Execute a chat task: assemble the conversation brief, run the
+        provider, write the terminal state back. No worktree, no issue."""
+        if self.chats is None:
+            raise RuntimeError("chat repository is not configured")
+        session = self.chats.get_session(task.chat_session_id)
+        if session is None:
+            raise NotFoundError(f"chat session not found: {task.chat_session_id}")
+        input_task_id = task.chat_input_task_id or task.id
+        batch = self.chats.input_messages(input_task_id)
+        if not batch:
+            raise ChatInputUnavailable(
+                f"task {task.id} has no sealed input batch (chat_input_task_id={input_task_id})"
+            )
+        transcript = self.chats.list_messages(
+            session.id, limit=self.chat_transcript_limit, exclude_task_id=input_task_id
+        )
+        prompt = build_chat_prompt(session, transcript, batch)
+        workdir = session.work_dir
+        if workdir is None or not Path(workdir).exists():
+            if self.workspaces is None:
+                raise RuntimeError("workspace manager is not configured")
+            workdir = self.workspaces.prepare_chat(session.id)
+        resume_session_id = resolve_chat_resume(self.chats, session, task)
+        if lease_lost.is_set() or self._shutdown.is_set():
+            # Lost the lease while preparing; leave the row to recovery.
+            return True
+        task = self.tasks.bind_execution_context(
+            task.id, resume_session_id, None, None, self.worker_id, task.attempt
+        )
+        if self.tasks.is_cancel_requested(task.id):
+            self._cancel_task(task)
+            return True
+        self.tasks.start(task.id, self.worker_id, task.attempt, advance_issue=False)
+
+        def cancellation_check() -> bool:
+            return (
+                self._shutdown.is_set()
+                or lease_lost.is_set()
+                or self.tasks.is_cancel_requested(task.id)
+            )
+
+        provider = self.providers.get(agent.provider)
+        result = provider.run(
+            agent,
+            None,
+            task,
+            lambda event_type, payload: self._record_event(task.id, event_type, payload),
+            workdir=workdir,
+            resume_session_id=resume_session_id,
+            is_cancelled=cancellation_check,
+            chat=ChatBrief(chat_session_id=session.id, prompt=prompt),
+        )
+        if self.tasks.is_cancel_requested(task.id):
+            self._cancel_task(task)
+        else:
+            # requires_input is meaningless in a conversation: the agent's
+            # question IS the reply, so every outcome completes the turn.
+            self.tasks.complete_chat(
+                task.id,
+                result.output or "",
+                result.session_id,
+                workdir,
+                self.worker_id,
+                task.attempt,
+            )
+        return True
 
     def _record_event(self, task_id, event_type, payload):
         try:

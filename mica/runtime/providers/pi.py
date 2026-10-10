@@ -16,6 +16,7 @@ from mica.domain import Agent, Issue, Task
 from .base import (
     AgentEventHandler,
     CancellationCheck,
+    ChatBrief,
     ProviderCancelled,
     ProviderRunResult,
     build_task_prompt,
@@ -32,13 +33,14 @@ class PiProvider:
     def run(
         self,
         agent: Agent,
-        issue: Issue,
+        issue: Optional[Issue],
         task: Task,
         on_event: AgentEventHandler,
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
         replay_conflicts: Optional[List[str]] = None,
+        chat: Optional[ChatBrief] = None,
     ) -> ProviderRunResult:
         if not workdir:
             raise RuntimeError("pi tasks require a working directory")
@@ -60,7 +62,11 @@ class PiProvider:
             bufsize=1,
             start_new_session=os.name != "nt",
         )
-        prompt = self._prompt(issue, task, replay_conflicts=replay_conflicts)
+        prompt = (
+            chat.prompt
+            if chat is not None
+            else self._prompt(issue, task, replay_conflicts=replay_conflicts)
+        )
         assert process.stdin is not None
         process.stdin.write(prompt)
         process.stdin.close()
@@ -128,9 +134,7 @@ class PiProvider:
         return ProviderRunResult(output=result, session_id=session_path)
 
     @staticmethod
-    def _prompt(
-        issue: Issue, task: Task, replay_conflicts: Optional[List[str]] = None
-    ) -> str:
+    def _prompt(issue: Issue, task: Task, replay_conflicts: Optional[List[str]] = None) -> str:
         return build_task_prompt(issue, task, replay_conflicts=replay_conflicts)
 
     @staticmethod

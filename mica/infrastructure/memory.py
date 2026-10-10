@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from mica.domain import (
     Agent,
     Issue,
+    IssueStatus,
     Project,
     Runtime,
     RuntimeCapability,
@@ -63,6 +64,15 @@ class InMemoryTaskRepository:
     def __init__(self) -> None:
         self._items: Dict[str, Task] = {}
         self._lock = RLock()
+        # Owner stores wired post-construction (bootstrap wires them after the
+        # circular issues/chats/task deps are built); the claim-time guards
+        # degrade to "alive" for stores that were never attached.
+        self._issues = None
+        self._chats = None
+
+    def attach_owner_stores(self, issues=None, chats=None) -> None:
+        self._issues = issues
+        self._chats = chats
 
     def add(self, task: Task) -> Task:
         with self._lock:
@@ -128,11 +138,22 @@ class InMemoryTaskRepository:
             for task in candidates:
                 if task.runtime_id != runtime_id or task.status != TaskStatus.QUEUED:
                     continue
+                if not self._owner_alive(task):
+                    continue
                 assignment_busy = any(
                     other.id != task.id
-                    and other.issue_id == task.issue_id
                     and other.agent_id == task.agent_id
                     and other.status in {TaskStatus.DISPATCHED, TaskStatus.RUNNING}
+                    and (
+                        (
+                            task.issue_id is not None
+                            and other.issue_id == task.issue_id
+                        )
+                        or (
+                            task.chat_session_id is not None
+                            and other.chat_session_id == task.chat_session_id
+                        )
+                    )
                     for other in self._items.values()
                 )
                 if assignment_busy:
@@ -163,6 +184,24 @@ class InMemoryTaskRepository:
                 task.updated_at = utc_now()
                 return deepcopy(task)
         return None
+
+    def _owner_alive(self, task: Task) -> bool:
+        # Mirrors the claim-time owner guards: issue tasks skip done/cancelled
+        # issues, chat tasks skip archived sessions.
+        if task.issue_id is not None:
+            if self._issues is not None:
+                issue = self._issues.get(task.issue_id)
+                if issue is None or issue.status in {
+                    IssueStatus.DONE,
+                    IssueStatus.CANCELLED,
+                }:
+                    return False
+            return True
+        if task.chat_session_id is not None and self._chats is not None:
+            session = self._chats.get_session(task.chat_session_id)
+            if session is None or session.status != "active":
+                return False
+        return True
 
     def renew_lease(self, task_id: str, worker_id: str, lease_seconds: int) -> bool:
         with self._lock:

@@ -1,4 +1,5 @@
 from .channel_repository import PostgresChannelRepository
+from .chat_repository import PostgresChatRepository
 from .connection import PostgresDatabase
 from .migrations import migrate
 from .repositories import (
@@ -23,5 +24,6 @@ __all__ = [
     "PostgresTaskRepository",
     "PostgresSquadRepository",
     "PostgresChannelRepository",
+    "PostgresChatRepository",
     "migrate",
 ]

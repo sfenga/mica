@@ -54,15 +54,27 @@ python -m pytest -q
 
 ### Web 与飞书入口
 
-正式 Web 控制台位于 `http://127.0.0.1:8000/app`。Web 与飞书消息都会进入同一个 `IngressService`：外部事件先按渠道、租户和事件 ID 去重，再完成用户身份映射，并在同一事务中创建 Issue、首个 Task 与回复 Outbox。Web 可通过 `Idempotency-Key` 防止重复提交；任务详情支持追问某条执行记录对应的 Agent，也可使用 `@agent:ID` 或 `@squad:ID` 显式路由。
+正式 Web 控制台位于 `http://127.0.0.1:8000/app`。Web 创建事项经过 `IngressService`（`Idempotency-Key` 防重复提交）；任务详情支持追问某条执行记录对应的 Agent，也可使用 `@agent:ID` 或 `@squad:ID` 显式路由。飞书侧自 KI-001 起与 Issue 解耦：**普通消息是与 Agent 的 Chat，只有显式 `/issue` 才建看板事项**。
 
-飞书开放平台需要订阅 `im.message.receive_v1`，回调地址设为 `POST /api/integrations/feishu/events`。配置 `.env.example` 中的四个 `FEISHU_*` 必填项后启用该端点；官方 SDK 负责验签与解密，应用凭证不会写入数据库。设置 `FEISHU_WORKSPACE_ID=local` 后，飞书与本地 Web 可以使用同一批 Agent/Squad。文本消息默认交给 `FEISHU_DEFAULT_AGENT_ID`，也可显式选择 Agent：
+飞书开放平台需要订阅 `im.message.receive_v1`，回调地址设为 `POST /api/integrations/feishu/events`。配置 `.env.example` 中的四个 `FEISHU_*` 必填项后启用该端点；官方 SDK 负责验签与解密，应用凭证不会写入数据库。设置 `FEISHU_WORKSPACE_ID=local` 后，飞书与本地 Web 可以使用同一批 Agent/Squad。
+
+飞书 Chat 的行为：
+
+- 私聊消息全部接收；群聊仅处理 @机器人 的消息。私聊与普通群按 `chat_id` 隔离，**群内每个话题是独立会话**（`chat_id + thread_id`）——一个话题就是一个 Agent 的房间。
+- 会话在首条消息时绑定 Agent：`agent=geometry-agent 画个布局` 绑定 geometry-agent，无前缀则绑定 `FEISHU_DEFAULT_AGENT_ID`；**绑定后不可变**，后续 `agent=`/`squad=` 只剥离并回引导（`squad=` 引导走 `/issue`）。
+- 同一会话 3 秒内的连续消息合并为一轮 Agent 执行（消息逐条保存）；处理中给原消息加 Typing 表情回执，完成后回复进原话题（建议在飞书应用后台开通表情回复权限，未开通时回执自动降级）。
+- Agent 完成、失败、取消或需要补充信息后，由持久化 Outbox 异步回传；投递采用指数退避，超过 `MICA_CHANNEL_MAX_ATTEMPTS` 后进入 `failed` 状态。batcher 为 API 进程内存态，**不要运行多个 API 实例**。
+
+需要进入看板跟踪的事项，在任意会话里发送：
 
 ```text
-mica agent=geometry-agent 根据这些参数生成布局方案
+/issue 修复订单导出异常
+（可另起一行写描述）
 ```
 
-平台先回复受理结果；Agent 完成、失败、取消或需要补充信息后，再由持久化 Outbox 异步回传原飞书会话。投递采用指数退避，超过 `MICA_CHANNEL_MAX_ATTEMPTS` 后进入 `failed` 状态，避免失效渠道造成无限重试。当前 Web 身份来自本机请求头，尚未接入企业 SSO，因此仍只应监听 `127.0.0.1`。
+`/issue` 立即创建看板卡片（负责人为会话绑定的 Agent，可在 Web 修改）并回执深链；其终态通知会回复到命令所在话题。历史行为变更：升级后飞书普通消息不再创建 Issue，存量飞书起源 Issue 的推进请在 Web 进行。
+
+当前 Web 身份来自本机请求头，尚未接入企业 SSO，因此仍只应监听 `127.0.0.1`。
 
 同一 Issue/Agent 在尚未执行时收到的连续补充会合并到一个待执行 Task；已有 Task 正在运行时，后续消息只汇入一个 successor Task。Daemon 领取时固化本轮输入快照，从而减少重复启动，同时保证执行中的上下文不会被后来消息改写。
 

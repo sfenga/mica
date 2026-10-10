@@ -10,13 +10,15 @@ from fastapi.testclient import TestClient
 from mica.api.app import create_app
 from mica.application import IdempotencyConflictError, IngressCommand
 from mica.bootstrap import build_memory_container
-from mica.domain import AssigneeType, OutboxMessage, TaskStatus
+from mica.domain import OutboxMessage, TaskStatus
 from mica.integrations.feishu import (
     FeishuApiError,
     FeishuConfig,
     FeishuMessageSender,
+    FeishuTypingReceipt,
     FeishuWebhook,
     parse_feishu_target,
+    parse_issue_command,
 )
 
 
@@ -48,7 +50,9 @@ def test_ingress_event_is_idempotent_and_maps_same_external_user():
     assert duplicate.id == first.id
     assert len(container.issues.list()) == 2
     assert first.created_by_user_id == second.created_by_user_id
-    assert len(container.channels.list_outbox()) == 2
+    # KI-001: acceptance cards are gone — messenger ingress no longer produces
+    # outbox traffic; chat results are the only messenger replies.
+    assert container.channels.list_outbox() == []
 
 
 def test_same_idempotency_key_rejects_a_different_payload():
@@ -76,39 +80,7 @@ def test_channel_reply_becomes_a_comment_instead_of_a_second_issue():
     assert returned.id == issue.id
     assert len(container.issues.list()) == 1
     assert [item.body for item in returned.comments] == ["继续检查超时重试"]
-    assert [item.message_type for item in container.channels.list_outbox()] == [
-        "issue.accepted",
-        "comment.accepted",
-    ]
-
-
-def test_issue_acceptance_outbox_carries_reply_target_and_thread():
-    container = build_memory_container()
-    issue, _ = container.ingress_service.submit(replace(command(), thread_id="omt-topic-1"))
-
-    notice = container.channels.list_outbox()[0]
-    assert notice.message_type == "issue.accepted"
-    assert notice.payload["reply_to"] == "message-event-1"
-    assert notice.payload["reply_in_thread"] is True
-    origin = container.channels.get_origin(issue.id)
-    assert origin.thread_id == "omt-topic-1"
-
-
-def test_comment_acceptance_outbox_replies_to_the_comment_message():
-    container = build_memory_container()
-    issue, _ = container.ingress_service.submit(command())
-    reply = replace(
-        command("event-2", "继续检查超时重试"),
-        related_issue_id=issue.id,
-        event_type="comment.created",
-    )
-
-    container.ingress_service.submit(reply)
-
-    notice = container.channels.list_outbox()[1]
-    assert notice.message_type == "comment.accepted"
-    assert notice.payload["reply_to"] == "message-event-2"
-    assert notice.payload["reply_in_thread"] is False
+    assert container.channels.list_outbox() == []
 
 
 def test_terminal_task_event_is_projected_to_feishu_outbox():
@@ -119,11 +91,11 @@ def test_terminal_task_event_is_projected_to_feishu_outbox():
     container.channel_worker.projector.run_once()
 
     messages = container.channels.list_outbox()
-    assert [message.message_type for message in messages] == ["issue.accepted", "task.completed"]
-    assert messages[1].destination == "oc-chat-1"
-    assert messages[1].payload["reply_to"] == "message-event-1"
-    assert messages[1].payload["reply_in_thread"] is False
-    assert "任务已完成" in messages[1].payload["text"]
+    assert [message.message_type for message in messages] == ["task.completed"]
+    assert messages[0].destination == "oc-chat-1"
+    assert messages[0].payload["reply_to"] == "message-event-1"
+    assert messages[0].payload["reply_in_thread"] is False
+    assert "任务已完成" in messages[0].payload["text"]
     assert container.tasks.list(issue.id)[0].status == TaskStatus.COMPLETED
 
 
@@ -147,15 +119,19 @@ def test_projector_retries_event_when_outbox_write_fails(monkeypatch):
         projector.run_once()
 
     assert projector.run_once() == 1
-    assert [item.message_type for item in container.channels.list_outbox()] == [
-        "issue.accepted",
-        "task.completed",
-    ]
+    assert [item.message_type for item in container.channels.list_outbox()] == ["task.completed"]
+
+
+def _seed_completed_task_outbox(container):
+    container.ingress_service.submit(command())
+    assert container.daemon.run_once()
+    container.channel_worker.projector.run_once()
+    return container.channels.list_outbox()[0]
 
 
 def test_outbox_without_sender_is_released_for_retry():
     container = build_memory_container()
-    container.ingress_service.submit(command())
+    _seed_completed_task_outbox(container)
 
     assert container.channel_worker.run_once() is False
 
@@ -167,7 +143,7 @@ def test_outbox_without_sender_is_released_for_retry():
 
 def test_outbox_stops_retrying_after_configured_attempt_limit():
     container = build_memory_container()
-    container.ingress_service.submit(command())
+    _seed_completed_task_outbox(container)
     container.channel_worker.max_attempts = 1
 
     assert container.channel_worker.run_once() is False
@@ -210,27 +186,42 @@ def test_health_endpoints_distinguish_process_liveness_from_readiness():
 
 
 def test_feishu_parser_selects_explicit_agent():
-    assert parse_feishu_target(
-        "@_user_1 /mica agent=geometry-agent 生成一个会议室布局", "local-assistant"
-    ) == (AssigneeType.AGENT, "geometry-agent", "生成一个会议室布局")
-    assert parse_feishu_target(
-        "mica squad=layout-squad 生成并校验会议室布局", "local-assistant"
-    ) == (AssigneeType.SQUAD, "layout-squad", "生成并校验会议室布局")
+    assert parse_feishu_target("agent=geometry-agent 生成一个会议室布局") == (
+        ("agent", "geometry-agent"),
+        "生成一个会议室布局",
+    )
+    assert parse_feishu_target("squad=layout-squad 生成并校验布局") == (
+        ("squad", "layout-squad"),
+        "生成并校验布局",
+    )
+    assert parse_feishu_target("普通消息") == (None, "普通消息")
 
 
-def test_feishu_sdk_verifies_and_dispatches_signed_message():
-    container = build_memory_container()
+def test_feishu_issue_command_parser_is_token_bounded():
+    assert parse_issue_command("/issue 修复导出异常\n第二行描述") == (
+        "修复导出异常",
+        "第二行描述",
+    )
+    assert parse_issue_command("/issue") == (None, "")
+    assert parse_issue_command("/issuetracker x") is None
+    assert parse_issue_command("普通消息") is None
+
+
+def _feishu_webhook(container):
     config = FeishuConfig(
         app_id="app-id",
         app_secret="app-secret",
         encrypt_key="encrypt-key",
         verification_token="verify-token",
     )
-    webhook = FeishuWebhook(config, container.ingress_service)
-    payload = {
+    return config, FeishuWebhook(config, container.chat_ingress)
+
+
+def _lark_message_event(event_id, message_id, text, thread_id=None, mentions=True):
+    event = {
         "schema": "2.0",
         "header": {
-            "event_id": "feishu-event-1",
+            "event_id": event_id,
             "event_type": "im.message.receive_v1",
             "create_time": str(int(time.time() * 1000)),
             "token": "verify-token",
@@ -244,20 +235,36 @@ def test_feishu_sdk_verifies_and_dispatches_signed_message():
                 "tenant_key": "tenant-1",
             },
             "message": {
-                "message_id": "om-message-1",
+                "message_id": message_id,
                 "chat_id": "oc-chat-1",
                 "chat_type": "group",
                 "message_type": "text",
-                "content": json.dumps({"text": "mica 检查业务规则"}),
+                "content": json.dumps({"text": text}),
             },
         },
     }
-    body = json.dumps(payload, separators=(",", ":")).encode()
+    if thread_id:
+        event["event"]["message"]["thread_id"] = thread_id
+    if mentions:
+        event["event"]["message"]["mentions"] = [
+            {
+                "key": "@_user_1",
+                "id": {"union_id": "on-bot", "user_id": "bot", "open_id": "ou-bot"},
+                "name": "mica-bot",
+                "tenant_key": "tenant-1",
+            }
+        ]
+    return event
+
+
+def _signed_handle(webhook, event):
+    body = json.dumps(event, separators=(",", ":")).encode()
     timestamp = str(int(time.time()))
     nonce = "nonce-1"
-    signature = hashlib.sha256((timestamp + nonce + config.encrypt_key).encode() + body).hexdigest()
-
-    status, _, content = webhook.handle(
+    signature = hashlib.sha256(
+        (timestamp + nonce + webhook.config.encrypt_key).encode() + body
+    ).hexdigest()
+    return webhook.handle(
         "http://localhost/api/integrations/feishu/events",
         {
             "X-Lark-Request-Timestamp": timestamp,
@@ -265,70 +272,80 @@ def test_feishu_sdk_verifies_and_dispatches_signed_message():
             "X-Lark-Signature": signature,
         },
         body,
+    )
+
+
+def test_feishu_sdk_routes_group_message_into_chat_session():
+    container = build_memory_container()
+    config, webhook = _feishu_webhook(container)
+
+    status, _, content = _signed_handle(
+        webhook,
+        _lark_message_event("feishu-event-1", "om-message-1", "mica 检查业务规则"),
     )
 
     assert status == 200
     assert json.loads(content) == {"msg": "success"}
-    assert len(container.issues.list()) == 1
+    assert container.issues.list() == []
+    sessions = container.chats.sessions_with_unowned_messages()
+    assert len(sessions) == 1
+    messages = container.chats.list_messages(sessions[0])
+    assert [message.role for message in messages] == ["user"]
+    assert messages[0].body == "检查业务规则"
+    assert messages[0].channel_ingested is True
 
 
-def test_feishu_webhook_persists_topic_thread_id_on_origin():
+def test_feishu_webhook_persists_topic_thread_id_on_binding():
     container = build_memory_container()
-    config = FeishuConfig(
-        app_id="app-id",
-        app_secret="app-secret",
-        encrypt_key="encrypt-key",
-        verification_token="verify-token",
-    )
-    webhook = FeishuWebhook(config, container.ingress_service)
-    payload = {
-        "schema": "2.0",
-        "header": {
-            "event_id": "feishu-event-topic-1",
-            "event_type": "im.message.receive_v1",
-            "create_time": str(int(time.time() * 1000)),
-            "token": "verify-token",
-            "app_id": "app-id",
-            "tenant_key": "tenant-1",
-        },
-        "event": {
-            "sender": {
-                "sender_id": {"open_id": "ou-user-1"},
-                "sender_type": "user",
-                "tenant_key": "tenant-1",
-            },
-            "message": {
-                "message_id": "om-topic-message-1",
-                "chat_id": "oc-chat-1",
-                "chat_type": "group",
-                "message_type": "text",
-                "thread_id": "omt-topic-9",
-                "content": json.dumps({"text": "mica 检查话题消息"}),
-            },
-        },
-    }
-    body = json.dumps(payload, separators=(",", ":")).encode()
-    timestamp = str(int(time.time()))
-    nonce = "nonce-1"
-    signature = hashlib.sha256((timestamp + nonce + config.encrypt_key).encode() + body).hexdigest()
+    config, webhook = _feishu_webhook(container)
 
-    status, _, _ = webhook.handle(
-        "http://localhost/api/integrations/feishu/events",
-        {
-            "X-Lark-Request-Timestamp": timestamp,
-            "X-Lark-Request-Nonce": nonce,
-            "X-Lark-Signature": signature,
-        },
-        body,
+    status, _, _ = _signed_handle(
+        webhook,
+        _lark_message_event(
+            "feishu-event-topic-1", "om-topic-message-1", "mica 检查话题消息", thread_id="omt-topic-9"
+        ),
     )
 
     assert status == 200
-    issue = container.issues.list()[0]
-    origin = container.channels.get_origin(issue.id)
-    assert origin.thread_id == "omt-topic-9"
-    notice = container.channels.list_outbox()[0]
-    assert notice.payload["reply_to"] == "om-topic-message-1"
-    assert notice.payload["reply_in_thread"] is True
+    session_id = container.chats.sessions_with_unowned_messages()[0]
+    binding = container.chats.binding_for_session(session_id)
+    assert binding.thread_id == "omt-topic-9"
+    assert binding.conversation_id == "oc-chat-1"
+    messages = container.chats.list_messages(session_id)
+    assert messages[0].body == "检查话题消息"
+
+
+def test_feishu_group_message_without_mention_is_dropped():
+    container = build_memory_container()
+    config, webhook = _feishu_webhook(container)
+
+    status, _, _ = _signed_handle(
+        webhook,
+        _lark_message_event("feishu-event-2", "om-message-2", "没人 @我", mentions=False),
+    )
+
+    assert status == 200
+    assert container.chats.sessions_with_unowned_messages() == []
+    assert container.issues.list() == []
+
+
+def test_feishu_first_message_explicit_agent_binds_the_session():
+    container = build_memory_container()
+    container.agents.add(replace(container.agents.get("local-assistant"), id="geometry-agent"))
+    config, webhook = _feishu_webhook(container)
+
+    status, _, _ = _signed_handle(
+        webhook,
+        _lark_message_event("feishu-event-3", "om-message-3", "agent=geometry-agent 画个布局"),
+    )
+
+    assert status == 200
+    session_id = container.chats.sessions_with_unowned_messages()[0]
+    session = container.chats.get_session(session_id)
+    assert session.agent_id == "geometry-agent"
+    messages = container.chats.list_messages(session_id)
+    # The prefix is stripped: the transcript carries the user's actual request.
+    assert messages[0].body == "画个布局"
 
 
 class _FakeFeishuResponse:
@@ -376,14 +393,14 @@ def _notice(**payload):
         channel="feishu",
         destination="oc-chat-1",
         source_event_id="event-1",
-        message_type="issue.accepted",
+        message_type="task.completed",
         payload=payload,
     )
 
 
 def test_sender_replies_to_the_origin_message_when_reply_target_present():
     sender, api = _sender()
-    notice = _notice(text="任务已受理", reply_to="om-origin-1", reply_in_thread=True)
+    notice = _notice(text="任务已完成", reply_to="om-origin-1", reply_in_thread=True)
 
     sender.send(notice)
 
@@ -397,7 +414,7 @@ def test_sender_replies_to_the_origin_message_when_reply_target_present():
 def test_sender_falls_back_to_chat_level_when_reply_target_is_unusable():
     sender, api = _sender(reply_code=230011)
 
-    sender.send(_notice(text="任务已受理", reply_to="om-recalled", reply_in_thread=False))
+    sender.send(_notice(text="任务已完成", reply_to="om-recalled", reply_in_thread=False))
 
     assert [call[0] for call in api.calls] == ["reply", "create"]
     assert api.calls[1][2].receive_id == "oc-chat-1"
@@ -407,7 +424,7 @@ def test_sender_does_not_fall_back_on_ambiguous_reply_errors():
     sender, api = _sender(reply_code=230020)
 
     with pytest.raises(FeishuApiError):
-        sender.send(_notice(text="任务已受理", reply_to="om-origin-1"))
+        sender.send(_notice(text="任务已完成", reply_to="om-origin-1"))
 
     assert [call[0] for call in api.calls] == ["reply"]
 
@@ -415,6 +432,20 @@ def test_sender_does_not_fall_back_on_ambiguous_reply_errors():
 def test_sender_posts_at_chat_level_without_reply_target():
     sender, api = _sender()
 
-    sender.send(_notice(text="任务已受理"))
+    sender.send(_notice(text="任务已完成"))
 
     assert [call[0] for call in api.calls] == ["create"]
+
+
+def test_typing_receipt_degrades_to_noop_without_lark_client():
+    receipt = FeishuTypingReceipt(
+        FeishuConfig(
+            app_id="app-id",
+            app_secret="app-secret",
+            encrypt_key="encrypt-key",
+            verification_token="verify-token",
+        )
+    )
+    # No Lark credentials in the test environment: add/clear must never raise.
+    receipt.add("om-message-1")
+    receipt.clear("om-message-1")

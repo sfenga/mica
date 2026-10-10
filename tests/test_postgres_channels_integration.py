@@ -198,12 +198,13 @@ def test_postgres_origin_persists_thread_id_and_outbox_reply_target():
             )
             origin = container.channels.get_origin(issue.id)
             assert origin.thread_id == "omt-topic"
+            # KI-001: messenger ingress no longer emits acceptance cards — the
+            # origin stays as the outbound anchor for terminal notifications.
             with container.database.connection() as connection:
                 row = connection.execute(
                     "SELECT payload FROM outbox_message WHERE message_type='issue.accepted'"
                 ).fetchone()
-            assert row["payload"]["reply_to"] == "om-origin"
-            assert row["payload"]["reply_in_thread"] is True
+            assert row is None
             raise RollbackSmokeTest
     except RollbackSmokeTest:
         pass

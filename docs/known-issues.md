@@ -20,7 +20,7 @@
 
 ## KI-001：Chat 与 Issue 的交互模型混用
 
-- **状态**：待设计
+- **状态**：已实施（2026-10-10；按下方「定稿方案」节落地，migration 012，硬切无历史兼容）
 - **优先级**：P1
 - **涉及模块**：飞书接入、Web 入口、Issue、Comment、Task、消息回传
 
@@ -150,15 +150,15 @@ Multica 将普通飞书消息建模为 Chat：
 
 进入实现前需要确认：
 
-1. 普通飞书私聊是否始终进入 Chat。
-2. 飞书群聊是仅在 @机器人时触发，还是允许绑定专属话题后免 @。
-3. 创建 Issue 是否只支持 `/issue`，还是同时提供飞书卡片按钮和自然语言确认。
-4. 从 Chat 转 Issue 时，是提取摘要，还是由用户编辑标题、描述和验收条件后确认。
-5. 一个飞书 ChatSession 默认绑定安装对应的 Agent，还是允许会话内切换 Agent。
-6. 飞书话题是否按 `chat_id + thread_id` 隔离 ChatSession。
-7. 外发受理消息、Agent 回复和卡片如何保存到 `issue_id/comment_id/task_id` 的反向映射。
-8. Chat Task 的连续消息合并窗口和崩溃恢复策略。
-9. Chat Task 与 Issue Task 是共享一张 Task 表并使用可空来源字段，还是使用独立输入表。
+1. ~~普通飞书私聊是否始终进入 Chat。~~（已定：是。p2p 全量接收，与 Multica 一致。）
+2. ~~飞书群聊是仅在 @机器人时触发，还是允许绑定专属话题后免 @。~~（已定：仅 @机器人；飞书平台默认只推 @bot 群消息，代码加防御过滤，话题绑定免 @ 列后续。）
+3. ~~创建 Issue 是否只支持 `/issue`，还是同时提供飞书卡片按钮和自然语言确认。~~（已定：v1 只支持 `/issue`。）
+4. ~~从 Chat 转 Issue 时，是提取摘要，还是由用户编辑标题、描述和验收条件后确认。~~（已定：`/issue <标题>` 直接建（首非空行为标题、其余为描述），不做确认 UI，与 Multica 一致。）
+5. ~~一个飞书 ChatSession 默认绑定安装对应的 Agent，还是允许会话内切换 Agent。~~（已定：会话绑定单个 Agent，创建时由首条消息 `agent=` 决定（缺省 `FEISHU_DEFAULT_AGENT_ID`），**创建后不可变**；后续 `agent=`/`squad=` 只剥离并回引导。对 Multica「一 bot 一 Agent」的单 bot 适配——会话绑死不变量保留，多 Agent 协作属 Issue 侧。）
+6. ~~飞书话题是否按 `chat_id + thread_id` 隔离 ChatSession。~~（已定：是。话题即会话——每个话题是可独立绑定 Agent 的房间；与 KI-008 给 `issue_origin` 落的 `thread_id` 同一语义。）
+7. ~~外发受理消息、Agent 回复和卡片如何保存到 `issue_id/comment_id/task_id` 的反向映射。~~（已定：chat 任务的回复目标在 flush 时冻结到 `agent_task.reply_to_message_id/reply_in_thread`；issue 任务沿用 `issue_origin`；**出站 message_id 不落库**（Multica 的 Lark 路径同为 fire-and-forget），KI-008 方案二继续搁置。）
+8. ~~Chat Task 的连续消息合并窗口和崩溃恢复策略。~~（已定：3 秒静默窗口只防抖任务创建，消息同步落库；停机 Drain，启动扫描未认领消息重挂；输入读取失败保留任务重投。）
+9. ~~Chat Task 与 Issue Task 是共享一张 Task 表并使用可空来源字段，还是使用独立输入表。~~（已定：共享 `agent_task`，`issue_id` 放开 NOT NULL + 新增 `chat_session_id` 等可空字段；输入批次用 `chat_input_task_id` 密封，不建独立表。）
 
 ### 初步数据模型方向
 
@@ -206,6 +206,43 @@ Task
 - Issue Comment 能保留真实父子关系，并路由给正确的 Agent/Squad 角色。
 - 重复飞书事件不会重复创建 ChatMessage、Issue 或 Task。
 - Agent 结果能够稳定回传到触发该 Task 时确定的飞书会话或话题。
+
+### 定稿方案（2026-10-10 实施）
+
+> 上文「当前行为 / 期望行为 / 初步数据模型方向」保留为实施前的演进记录；本节为定稿并已落地的设计。openspec 变更：`openspec/changes/add-feishu-chat/`（proposal/design/tasks/spec deltas）。
+
+**产品定位**（对齐 Multica）：飞书 = Chat 的完整入口 + `/issue` 建单入口；Issue 的推进和验收只在 Web。两处有意偏离 Multica 并写明：Issue 任务终态继续推飞书（存量习惯保留）；单 bot 多 Agent + 首条消息绑定（替代一 bot 一 Agent）。
+
+**数据模型（migration 012）**：
+
+```text
+chat_session: workspace_id, agent_id(不可变), creator_user_id, title, status,
+              session_id / runtime_id / work_dir   ← daemon 属主三元组，终态 pin 回
+channel_chat_binding: (channel, tenant_key, conversation_id, thread_id) 组合唯一，
+              chat_session_id UNIQUE 1:1, last_message_id / last_thread_id
+chat_message: role, body, external_message_id, parent_external_message_id,
+              task_id(双向: user=被哪轮消费, assistant=哪轮产出),
+              message_kind(text|channel_command), channel_ingested
+agent_task:   issue_id 放开 NOT NULL; + chat_session_id / chat_input_task_id /
+              reply_to_message_id / reply_in_thread
+```
+
+**入站路由唯一规则**：消息按 `(chat_id, thread_id)` 查 binding——命中进该会话，未命中新建。`issue_origin` 退出入站（只作出站锚点）；`parent_id/root_id` 只存引用不路由。群聊仅 @bot；text/post 拍平，媒体占位符。`/issue` 命令：`channel_command` 落库但不触发 chat run、不进 transcript；建 Issue + 写 `issue_origin`（终态通知沿原话题回复）；负责人取会话绑定 Agent；不做活跃 Issue 守卫。
+
+**合并窗口**：3 秒静默窗口只防抖任务创建（`application/chat.py` 的 `ChatBatcher`）；flush 同事务密封 `chat_input_task_id` + 冻结 `reply_to`/`reply_in_thread`（批次末条）+ 解析 runtime；停机 `Drain()`，启动扫描重挂；在跑时新消息只落库，终态后 successor。约束：batcher 为 API 进程内存态，单 API 实例部署。
+
+**认领与执行**：`claim_next` 改 `LEFT JOIN issue` + NULL 安全双分支互斥（issue 按 `(issue_id, agent_id)` 且 owner 非 done/cancelled；chat 按会话互斥且 `chat_session.status='active'`），`FOR UPDATE` 只锁任务行（nullable 侧不可锁；done 守卫无竞态——`transition_issue(DONE)` 要求无 active 任务，CANCELLED 自行取消排队任务）。daemon `run_once` 按 `chat_session_id` 分叉：resume 三级回退（会话指针需 runtime 匹配 → 最近任务行 `session_id` → 全新）；`work_dir` 首轮按会话建目录、终态 pin 回（带"无更新任务"守卫）；不走 worktree/分支交付；**输入读取失败保留任务重投**；`requires_input` 在会话语义下按普通完成处理（Agent 的提问就是回复）；输出以 `role='assistant'` 落 transcript。
+
+**出站**：Typing 表情回执替代受理卡片（回复/失败/取消时清除；表情权限缺失降级 no-op）；chat 终态复用 KI-008 reply 机制（6 个不可回复业务码才回退群发）；空输出静默；`channel_ingested` 只落库，门控逻辑随 Web Chat 接入启用。
+
+**验收修订**（对原验收条件的增量）：
+
+- 作废：「回复 Agent 的飞书消息能够映射到正确的 ChatMessage **或 Issue Comment**」「Issue Comment 能保留真实父子关系」（飞书→评论路径整体移除，问题三/四随之消失）；「`/issue` 不会同时创建 Chat Task 和 Issue Task」保留并已实现（`channel_command`）。
+- 替代新增：普通咨询不进看板且进会话；话题隔离；`agent=` 首条绑定/后续引导；重复事件零副作用；密封批次逐条保存；resume 三级回退；归档会话不认领；chat 任务不驱动 issue 状态；web 查询不漏出 chat 任务。
+- 明确不做（本期内）：Web Chat UI、`/clear`/`/new` 与代际机制、Squad 进 Chat、媒体下载管道、绑定令牌、出站 message_id 落库、优先级列、引用 enrich、活跃 Issue 守卫、历史数据兼容。
+- 行为变更声明：**上线后飞书普通消息不再创建 Issue**；存量飞书起源 Issue 的话题内新消息进入 chat（其 Issue 的后续推进在 Web，`issue_origin` 仅保证终态通知仍回原话题）。
+
+**测试范围**：`tests/test_chat_ingress.py`（路由/绑定/去重/引导/适配器拍平）、`tests/test_chat_batcher.py`（窗口/密封/Drain/恢复）、`tests/test_chat_daemon.py`（认领分叉/resume 回退/pin 回/失败隔离/投影）、`tests/test_chat_issue_command.py`、`tests/test_postgres_chat_integration.py`（binding 并发收敛、认领互斥与双类型共存，真实 PostgreSQL）。全量 349 项通过（含 PG 集成）。
 
 ---
 
@@ -1043,3 +1080,4 @@ bot 发受理 B1（群层面新消息，id 不落库，不进 M1 的话题）✗
 - 2026-10-09：实施完成，待提交。改动文件：`mica/application/channels.py`、`mica/integrations/feishu.py`、`mica/domain/models.py`、`mica/infrastructure/database/channel_repository.py`、`mica/infrastructure/database/sql/011_origin_thread_id.{up,down}.sql`；测试见 `tests/test_channel_ingress.py`（新增 6 项）与 `tests/test_postgres_channels_integration.py`（新增 1 项）。
 - 验证：全量 Python 测试 316 项通过（含一次性 PostgreSQL 库的集成测试）；`ruff check mica` 通过；本次改动文件 `ruff format --check` 通过。
 - 残留边界：方案二（出站 message_id 落库回退查询）未实施；真实飞书话题联调未做。
+- **2026-10-10 追记（KI-001 实施）**：本修复中「入站靠 `parent_id/root_id` 命中 `find_origin` 接回 Issue」的路由职责已被 KI-001 的 ChatSession binding 路由**取代并移除**；`issue_origin`（含 011 落的 `thread_id`）保留为纯出站锚点，继续支撑 Issue 终态通知回原话题。本节"修复方式"与"验收条件"保留为历史记录；上文提到的部分测试已随行为变更重写（受理卡类断言删除，见 KI-001 定稿方案·测试范围）。

@@ -14,6 +14,7 @@ from mica.domain import Agent, Issue, Task
 from .base import (
     AgentEventHandler,
     CancellationCheck,
+    ChatBrief,
     ProviderCancelled,
     ProviderRunResult,
     build_child_env,
@@ -193,18 +194,27 @@ class CliProvider:
     def run(
         self,
         agent: Agent,
-        issue: Issue,
+        issue: Optional[Issue],
         task: Task,
         on_event: AgentEventHandler,
         workdir: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         is_cancelled: Optional[CancellationCheck] = None,
         replay_conflicts: Optional[List[str]] = None,
+        chat: Optional[ChatBrief] = None,
     ) -> ProviderRunResult:
         if not workdir:
             raise RuntimeError(f"{self.flavor} tasks require a working directory")
-        prompt = self._prompt(
-            agent, issue, task, resumed=bool(resume_session_id), replay_conflicts=replay_conflicts
+        prompt = (
+            chat.prompt
+            if chat is not None
+            else self._prompt(
+                agent,
+                issue,
+                task,
+                resumed=bool(resume_session_id),
+                replay_conflicts=replay_conflicts,
+            )
         )
         command = self._command(agent, prompt, resume_session_id)
         if (
@@ -222,7 +232,7 @@ class CliProvider:
             process = subprocess.Popen(
                 command,
                 cwd=workdir,
-                env=build_child_env(issue, task),
+                env=build_child_env(issue, task, chat=chat),
                 stdin=subprocess.PIPE if self.flavor == "claude" else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

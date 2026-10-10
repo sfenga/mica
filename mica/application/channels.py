@@ -114,21 +114,6 @@ class IngressService:
                     command.external_event_id,
                     issue.id,
                 )
-                if command.channel == "feishu":
-                    self.channels.add_outbox(
-                        OutboxMessage(
-                            channel="feishu",
-                            destination=command.conversation_id,
-                            source_event_id=command.external_event_id,
-                            message_type="comment.accepted",
-                            payload={
-                                "text": f"补充要求已加入：{issue.title}\nIssue: {issue.id}",
-                                "issue_id": issue.id,
-                                "reply_to": command.external_message_id,
-                                "reply_in_thread": bool(command.thread_id),
-                            },
-                        )
-                    )
                 return self.issues.get(issue.id), True
             issue = self.triggers.create_issue(
                 title=command.title,
@@ -153,21 +138,6 @@ class IngressService:
             self.channels.attach_issue(
                 command.channel, command.tenant_key, command.external_event_id, issue.id
             )
-            if command.channel == "feishu":
-                self.channels.add_outbox(
-                    OutboxMessage(
-                        channel="feishu",
-                        destination=command.conversation_id,
-                        source_event_id=command.external_event_id,
-                        message_type="issue.accepted",
-                        payload={
-                            "text": f"任务已受理：{issue.title}\nIssue: {issue.id}",
-                            "issue_id": issue.id,
-                            "reply_to": command.external_message_id,
-                            "reply_in_thread": bool(command.thread_id),
-                        },
-                    )
-                )
             return issue, True
 
 
@@ -182,13 +152,14 @@ TERMINAL_EVENT_TYPES = {
 
 class TaskNotificationProjector:
     def __init__(
-        self, events, tasks, channels: ChannelRepository, transactions=None, issues=None
+        self, events, tasks, channels: ChannelRepository, transactions=None, issues=None, chats=None
     ) -> None:
         self.events = events
         self.tasks = tasks
         self.channels = channels
         self.transactions = transactions
         self.issues = issues
+        self.chats = chats
         self._cursor_time = datetime.fromtimestamp(0, timezone.utc)
         self._cursor_id = ""
 
@@ -209,6 +180,8 @@ class TaskNotificationProjector:
         task = self.tasks.get(event.task_id)
         if task is None:
             return 0
+        if task.chat_session_id is not None:
+            return self._project_chat(task, event)
         if self.issues is not None:
             if self.issues.get_for_update(task.issue_id) is None:
                 return 0
@@ -232,6 +205,29 @@ class TaskNotificationProjector:
                     "text": self._text(event.event_type, task, event.payload),
                     "reply_to": origin.external_message_id,
                     "reply_in_thread": bool(origin.thread_id),
+                },
+            )
+        )
+        return 1
+
+    def _project_chat(self, task, event) -> int:
+        """Chat task terminal → the session's binding carries the audience; the
+        reply target was frozen onto the task at flush time."""
+        if self.chats is None:
+            return 0
+        binding = self.chats.binding_for_session(task.chat_session_id)
+        if binding is None or binding.channel != "feishu":
+            return 0
+        self.channels.add_outbox(
+            OutboxMessage(
+                channel="feishu",
+                destination=binding.conversation_id,
+                source_event_id=event.id,
+                message_type=event.event_type,
+                payload={
+                    "text": self._text(event.event_type, task, event.payload),
+                    "reply_to": task.reply_to_message_id,
+                    "reply_in_thread": bool(task.reply_in_thread),
                 },
             )
         )

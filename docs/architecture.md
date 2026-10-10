@@ -60,20 +60,31 @@ ACP v2 当前仍是实验草案，本阶段采用稳定 v1；A2A 采用已发布
 ## 阶段 5：Web 与飞书协作入口
 
 ```text
-Web / 飞书事件 → IngressService → 外部事件去重 + 用户映射
+Web 事件 ────────→ IngressService → 外部事件去重 + 用户映射
                                       ↓（同一事务）
                                 Issue + Task + Origin
+飞书事件 ──→ FeishuWebhook（帧解码）→ ChatIngressService → ChatSession/ChatMessage
+                                      ↓（3s 静默窗口）
+                                chat 任务（共用 agent_task 队列）
                                       ↓
 TaskEvent → NotificationProjector → Outbox → 飞书消息 API
 ```
 
-- Web 与飞书只负责解析各自请求，创建任务统一经过 `IngressService`，避免渠道形成两套业务逻辑。
-- Web 可从执行记录直接追问指定 Agent，也支持 `@agent:ID` / `@squad:ID`；飞书对原消息的线程回复追加到已有 Issue，而不是重复创建任务卡片。
+- Web 只负责解析请求，创建 Issue 统一经过 `IngressService`；飞书自 KI-001 起走独立的 Chat 引擎（`application/chat.py`），普通消息进入 ChatSession，只有显式 `/issue` 才建 Issue——渠道不再形成两套 Issue 语义，但 Chat 与 Issue 共用 Task 调度、Provider、事件与取消机制。
+- Web 可从执行记录直接追问指定 Agent，也支持 `@agent:ID` / `@squad:ID`；飞书普通消息与 Issue 解耦，结果回复到触发消息/话题（回复目标在 flush 时冻结到任务行）。
 - 外部事件以 `(channel, tenant_key, external_event_id)` 唯一约束保证幂等；同一 Key 携带不同业务内容会返回冲突。
 - 外部身份以 `(channel, tenant_key, external_user_id)` 映射平台用户，Issue 保存创建人，飞书租户映射到独立 Workspace。
 - `IssueOrigin` 保存任务来源会话，使执行结果能够回到原飞书群或单聊。
 - 结果通知先由 TaskEvent 投影为 Outbox；投递线程通过租约认领、失败退避和消息 UUID 发送，进程重启后可继续处理。
 - 飞书官方 SDK 负责回调 token、签名、加密事件与 tenant access token；平台负责业务幂等和事务一致性。
+
+### KI-001：飞书 Chat 模型（2026-10-10）
+
+- **分层**（对齐 Multica 的 engine/adapter 结构）：`application/chat.py` 是渠道无关的 Chat 引擎（会话路由、消息落库、去重、合并窗口、`/issue` 命令）；`integrations/feishu.py` 只做帧解码（text/post 拍平、@bot 过滤、前缀解析）与表情回执；`database/chat_repository.py` 收敛全部 chat SQL。adapter 翻译事件为 `ChatIngressCommand`，不含业务逻辑。
+- **隔离与绑定**：`channel_chat_binding` 以 `(channel, tenant_key, conversation_id, thread_id)` 组合唯一（无话题用 `''` 哨兵），与会话 1:1；会话绑定单个 Agent（首条消息 `agent=` 决定，创建后不可变），话题即会话。
+- **批次与认领**：3 秒静默窗口只防抖任务创建（batcher 为 API 进程内存态，单实例约束）；flush 密封 `chat_input_task_id` 并冻结 `reply_to`；chat 任务与 issue 任务共用 `agent_task`，认领 SQL 按形状分叉互斥（会话互斥 + `status='active'` 守卫），daemon 按 `chat_session_id` 分叉执行——resume 三级回退、会话级 `work_dir`（daemon 属主，终态 pin 回）、无 worktree。
+- **出站**：Typing 表情回执 + 冻结回复目标 + KI-008 的 reply/降级机制；Issue 终态通知继续推飞书（有意偏离 Multica）。
+- 契约与边界：`openspec/changes/add-feishu-chat/`；实施记录：`docs/known-issues.md` KI-001「定稿方案」。
 
 ## 阶段 6：Agent Squad 编排
 

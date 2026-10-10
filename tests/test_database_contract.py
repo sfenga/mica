@@ -67,7 +67,7 @@ class DatabaseContractTest(unittest.TestCase):
             / "database"
             / "repositories.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("FOR UPDATE OF queued, owner_issue SKIP LOCKED", repository_source)
+        self.assertIn("FOR UPDATE OF queued SKIP LOCKED", repository_source)
         self.assertIn("make_interval(secs => %s)", repository_source)
         self.assertIn("assigned_agent.runtime_id=queued.runtime_id", repository_source)
         self.assertIn("owner_issue.status NOT IN ('done', 'cancelled')", repository_source)

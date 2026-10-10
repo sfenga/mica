@@ -352,6 +352,16 @@ Agent 的 Prompt、会话状态和工具调用在启动后已经确定。修改 
 - @mention 目标不存在时整条评论创建失败（路由与落库同事务），见 `docs/known-issues.md` KI-006。
 - 回复追溯的线程归属只认根评论的触发记录；中途被 @ 拉进线程的 Agent 不接管整线，见 `docs/known-issues.md` KI-007。
 
+## 7.1 2026-10-10 追加：飞书消息与 Issue 解耦（KI-001 实施）
+
+上文"飞书任务直接建成 Issue"的模型已被 Chat 模型取代，原文保留作演进记录：
+
+- 飞书普通消息（私聊全部、群聊 @bot）进入 `ChatSession`/`ChatMessage`，按 `(chat_id, thread_id)` 隔离——话题即会话；不再出现在 Issue 看板。
+- 连续消息用 3 秒静默窗口合并为**一个** chat 任务（只防抖任务创建，消息本身同步落库），批次用 `chat_input_task_id` 密封到任务上；领取互斥按会话而非 `(issue, agent)`。
+- 显式 `/issue <标题>` 才建 Issue（命令消息落库但不触发 chat run）；`agent=` 前缀只在会话首条消息生效（绑定会话 Agent，此后不可变），后续只剥离并回引导。
+- `issue_origin` 退出入站路由，保留为 Issue 终态通知的出站锚点；飞书→Issue 评论路径整体移除，问题三/四（评论树丢失回复关系、追加路径不传 `agent=`）随之消失。
+- 定稿与边界见 `docs/known-issues.md` KI-001「定稿方案」；变更契约见 `openspec/changes/add-feishu-chat/`。
+
 ## 8. 面试时的 90 秒讲法
 
-“这个问题来自用户会在 Web 或飞书里连续补充要求。如果每条评论都直接启动 Agent，不但浪费调用，还可能让后来的要求和正在执行的上下文交叉。第一版是 Issue 下每个动作生成 Task，但连续评论仍会产生多条待执行任务；应用层先查后写又有并发竞态。后来我把约束下沉到 PostgreSQL，用 `(issue_id, agent_id) WHERE status='queued'` 的部分唯一索引配合 UPSERT，使同一 Agent 同时只有一个待执行批次。Daemon 领取时再用一条 SQL 把评论 ID 按顺序固化到 `delivered_comment_ids`，`queued → dispatched` 就成为输入封口点，领取后的新评论进入下一条 queued Task。渠道侧统一经过 IngressService，用外部事件 ID 和 payload hash 做幂等。这里参考了 Multica 的评论路由和状态型合并，但 Mica 当前把飞书任务直接建成 Issue；Multica 的普通渠道消息则先进入带短时间 debounce 的 ChatSession。”
+“这个问题来自用户会在 Web 或飞书里连续补充要求。如果每条评论都直接启动 Agent，不但浪费调用，还可能让后来的要求和正在执行的上下文交叉。第一版是 Issue 下每个动作生成 Task，但连续评论仍会产生多条待执行任务；应用层先查后写又有并发竞态。后来我把约束下沉到 PostgreSQL，用 `(issue_id, agent_id) WHERE status='queued'` 的部分唯一索引配合 UPSERT，使同一 Agent 同时只有一个待执行批次。Daemon 领取时再用一条 SQL 把评论 ID 按顺序固化到 `delivered_comment_ids`，`queued → dispatched` 就成为输入封口点，领取后的新评论进入下一条 queued Task。渠道侧统一经过 IngressService，用外部事件 ID 和 payload hash 做幂等。这里参考了 Multica 的评论路由和状态型合并。飞书侧自 2026-10-10 起（KI-001）普通消息进入带 3 秒 debounce 的 ChatSession，只有显式 /issue 才建 Issue——与 Multica 的 Chat/Issue 分层对齐。”

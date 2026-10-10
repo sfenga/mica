@@ -25,6 +25,7 @@ TASK_COLUMNS = """
 id, issue_id, agent_id, runtime_id, trigger_type, trigger_id, status,
  squad_id, is_leader_task, delegated_from_task_id, handoff_note,
 trigger_comment_id, merged_comment_ids, delivered_comment_ids,
+chat_session_id, chat_input_task_id, reply_to_message_id, reply_in_thread,
 session_id, prior_session_id, branch_name, worktree_path, recorded_tip, lease_expires_at,
 claimed_by, attempt, cancel_requested, output, error, created_at, updated_at
 """
@@ -48,6 +49,10 @@ def _task(row) -> Optional[Task]:
         trigger_comment_id=row["trigger_comment_id"],
         merged_comment_ids=list(row["merged_comment_ids"] or []),
         delivered_comment_ids=list(row["delivered_comment_ids"] or []),
+        chat_session_id=row["chat_session_id"],
+        chat_input_task_id=row["chat_input_task_id"],
+        reply_to_message_id=row["reply_to_message_id"],
+        reply_in_thread=row["reply_in_thread"],
         session_id=row["session_id"],
         prior_session_id=row["prior_session_id"],
         branch_name=row["branch_name"],
@@ -266,6 +271,8 @@ class PostgresTaskRepository:
             row = connection.execute(
                 """UPDATE agent_task SET status=%s, trigger_comment_id=%s,
                     merged_comment_ids=%s, delivered_comment_ids=%s,
+                    chat_session_id=%s, chat_input_task_id=%s,
+                    reply_to_message_id=%s, reply_in_thread=%s,
                     session_id=%s, prior_session_id=%s,
                     branch_name=%s, worktree_path=%s, recorded_tip=%s, lease_expires_at=%s, claimed_by=%s,
                     attempt=%s, cancel_requested=%s, output=%s, error=%s, updated_at=%s
@@ -275,6 +282,10 @@ class PostgresTaskRepository:
                     task.trigger_comment_id,
                     task.merged_comment_ids,
                     task.delivered_comment_ids,
+                    task.chat_session_id,
+                    task.chat_input_task_id,
+                    task.reply_to_message_id,
+                    task.reply_in_thread,
                     task.session_id,
                     task.prior_session_id,
                     task.branch_name,
@@ -311,15 +322,30 @@ class PostgresTaskRepository:
             row = connection.execute(
                 f"""WITH candidate AS (
                     SELECT queued.id FROM agent_task AS queued
-                    JOIN issue AS owner_issue ON owner_issue.id=queued.issue_id
+                    LEFT JOIN issue AS owner_issue ON owner_issue.id=queued.issue_id
+                    LEFT JOIN chat_session AS owner_chat
+                        ON owner_chat.id=queued.chat_session_id
                     JOIN agent AS assigned_agent ON assigned_agent.id=queued.agent_id
                         AND assigned_agent.runtime_id=queued.runtime_id
                     WHERE queued.runtime_id=%s AND queued.status='queued'
-                    AND owner_issue.status NOT IN ('done', 'cancelled')
+                    -- Task shapes are mutually exclusive on exactly one non-null
+                    -- owner FK; NULL <> NULL keeps the two guard branches from
+                    -- ever crossing.
+                    AND (
+                        (queued.issue_id IS NOT NULL
+                            AND owner_issue.status NOT IN ('done', 'cancelled'))
+                        OR (queued.chat_session_id IS NOT NULL
+                            AND owner_chat.status='active')
+                    )
                     AND NOT EXISTS (
                         SELECT 1 FROM agent_task AS active
-                        WHERE active.issue_id=queued.issue_id AND active.agent_id=queued.agent_id
+                        WHERE active.agent_id=queued.agent_id
                         AND active.status IN ('dispatched', 'running')
+                        AND (
+                            (queued.issue_id IS NOT NULL AND active.issue_id=queued.issue_id)
+                            OR (queued.chat_session_id IS NOT NULL
+                                AND active.chat_session_id=queued.chat_session_id)
+                        )
                     )
                     AND (
                         NOT queued.is_leader_task OR queued.squad_id IS NULL OR NOT EXISTS (
@@ -331,7 +357,12 @@ class PostgresTaskRepository:
                         )
                     )
                     ORDER BY queued.created_at
-                    FOR UPDATE OF queued, owner_issue SKIP LOCKED
+                    -- Locking only the task row: the nullable sides of the
+                    -- LEFT JOINs cannot take FOR UPDATE, and the owner guards
+                    -- are race-free anyway — transition_issue(DONE) refuses
+                    -- while a queued task keeps the issue active, and
+                    -- transition_issue(CANCELLED) cancels queued tasks itself.
+                    FOR UPDATE OF queued SKIP LOCKED
                     LIMIT 1
                 )
                 UPDATE agent_task AS task
@@ -440,6 +471,10 @@ class PostgresTaskRepository:
             task.trigger_comment_id,
             task.merged_comment_ids,
             task.delivered_comment_ids,
+            task.chat_session_id,
+            task.chat_input_task_id,
+            task.reply_to_message_id,
+            task.reply_in_thread,
             task.session_id,
             task.prior_session_id,
             task.branch_name,

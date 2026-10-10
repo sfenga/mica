@@ -1,4 +1,5 @@
 from .channel_memory import InMemoryChannelRepository
+from .chat_memory import InMemoryChatRepository
 from .memory import (
     InMemoryAgentRepository,
     InMemoryEventRepository,
@@ -20,4 +21,5 @@ __all__ = [
     "InMemoryTaskRepository",
     "InMemorySquadRepository",
     "InMemoryChannelRepository",
+    "InMemoryChatRepository",
 ]

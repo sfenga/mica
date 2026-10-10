@@ -59,11 +59,15 @@ def create_app(container: Optional[ApplicationContainer] = None) -> FastAPI:
         state.channel_worker.start()
         if embedded_daemon:
             state.worker.start()
+        # Re-arm debounce windows for batches a crash left unflushed: the
+        # messages are durable, only the run trigger was in-process.
+        state.chat_ingress.recover_pending()
         try:
             yield
         finally:
             if embedded_daemon:
                 state.worker.stop()
+            state.chat_batcher.drain()
             state.channel_worker.stop()
             if state.event_relay is not None:
                 state.event_relay.stop()

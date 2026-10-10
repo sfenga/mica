@@ -69,6 +69,18 @@
 - [ ] Leader 委派后父 Issue 保持 `in_progress`；只有 Leader 汇总决定 `complete` 后进入 `in_review`，用户确认后进入 `done`。
 - [ ] Web 和飞书均可将新 Issue 指派给 Squad，飞书最终只收到整体完成结果而不是每个内部 Task 的误报。
 
+
+## 阶段 5.5：飞书 Chat 模型（KI-001，2026-10-10）
+
+| 关注点 | 覆盖 |
+|---|---|
+| 入站路由与会话隔离 | `tests/test_chat_ingress.py`：私聊/群 @bot/话题隔离/重复事件零副作用/首条 `agent=` 绑定/无效 Agent fail-closed/引导回复 |
+| 适配器解码 | `tests/test_channel_ingress.py`：text 进会话、post 拍平、媒体占位符、thread_id 落 binding |
+| 合并窗口 | `tests/test_chat_batcher.py`：3s 窗口合并批次/密封/冻结 reply_to/Drain/启动恢复/归档会话拒 flush |
+| 认领与执行 | `tests/test_chat_daemon.py`：chat 任务认领分叉/resume 三级回退/会话 workdir pin 回/失败不动看板/输入读取失败保留/终态投影 |
+| `/issue` 命令 | `tests/test_chat_issue_command.py`：建单+origin+回执/裸命令 usage/命令不进 transcript/通知回原话题 |
+| PostgreSQL 集成 | `tests/test_postgres_chat_integration.py`：binding 并发收敛（真实双连接竞态）、消息去重约束、chat/issue 任务形状互斥认领 |
+
 ## 验收记录模板
 
 ```text

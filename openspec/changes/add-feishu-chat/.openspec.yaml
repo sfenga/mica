@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-10-09
+goal: KI-001 定稿落地——飞书消息与 Issue 解耦为 Chat 模型（ChatSession/ChatMessage/binding，
+  隔离键 chat_id 与 chat_id:thread_id，单 Agent 绑定不可变，3 秒静默窗口只防抖任务创建，
+  共表 agent_task 认领分叉，daemon 属主三元组 pin 回，Typing 回执 + KI-008 出站机制复用，
+  /issue 命令建单）。对齐 Multica chat 骨架，硬切无历史兼容；capability=mica-chat 新建，
+  mica-core 的 Task 实体与认领循环两条 Requirement 同步修改。单提交交付。

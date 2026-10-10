@@ -219,6 +219,8 @@ Outbox 使用 `(channel, source_event_id, message_type)` 唯一约束去重；�
 - Projector 游标保存在进程内；重启后会重新扫描历史事件，但依赖 Outbox 唯一约束避免重复消息。大规模场景应持久化游标。
 - Web 的实时总线是进程内 EventBus + 数据库轮询 Relay，不是 Kafka 等跨节点消息总线。
 
+- 2026-10-10 追加（KI-001）：飞书侧普通消息进入 Chat 会话后，Squad 不再从飞书消息直接指派——会话只绑单个 Agent，`squad=` 前缀在 chat 中回引导（`/issue squad=...` 建单）；Squad 的飞书发起入口收敛为 `/issue` 一条路。上文"飞书线程回复回到原 Issue"的描述同样被 Chat 模型取代。
+
 ## 12. 面试时的 90 秒讲法
 
 “Squad 场景里我没有采用收到任务就广播所有成员，因为简单任务会造成无效调用，而且没人负责处理冲突结果。整体参考 Multica 的 Leader-first：Web 配置 Leader、成员角色和能力，Leader 根据 roster 选择成员，成员结果再回到 Leader 收口。Mica 为了先把编排状态做确定，要求 Leader 输出 delegate 或 complete JSON，由平台校验 roster、重复成员和空指令，再创建带批次来源的成员 Task；同批成员结束后只唤醒一次 Leader 汇总。这一点比 Multica 通过平台工具、成员评论或子 Issue 委派更窄，但更容易保证状态一致。飞书和 Web 共用 Mica 的 IngressService，线程回复回到原 Issue，最终结果通过事务 Outbox 投递回原会话。”

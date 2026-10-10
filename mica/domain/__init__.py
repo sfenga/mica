@@ -1,5 +1,8 @@
 from .models import (
     Agent,
+    ChannelChatBinding,
+    ChatMessage,
+    ChatSession,
     Comment,
     ExternalEvent,
     ExternalIdentity,
@@ -21,6 +24,9 @@ from .status import AssigneeType, IssueStatus, TaskStatus
 __all__ = [
     "Agent",
     "AssigneeType",
+    "ChannelChatBinding",
+    "ChatMessage",
+    "ChatSession",
     "Comment",
     "ExternalEvent",
     "ExternalIdentity",
