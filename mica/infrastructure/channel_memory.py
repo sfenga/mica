@@ -27,8 +27,9 @@ class InMemoryChannelRepository:
 
     def delete_chat_data(self, event_ids: list[str]) -> None:
         with self.lock:
-            self._outbox = {k: m for k, m in self._outbox.items()
-                            if m.source_event_id not in event_ids}
+            self._outbox = {
+                k: m for k, m in self._outbox.items() if m.source_event_id not in event_ids
+            }
             self._outbox_keys = {k: v for k, v in self._outbox_keys.items() if v in self._outbox}
 
     def delete_issue_data(self, issue_id: str, event_ids: list[str]) -> None:

@@ -145,10 +145,7 @@ class InMemoryTaskRepository:
                     and other.agent_id == task.agent_id
                     and other.status in {TaskStatus.DISPATCHED, TaskStatus.RUNNING}
                     and (
-                        (
-                            task.issue_id is not None
-                            and other.issue_id == task.issue_id
-                        )
+                        (task.issue_id is not None and other.issue_id == task.issue_id)
                         or (
                             task.chat_session_id is not None
                             and other.chat_session_id == task.chat_session_id

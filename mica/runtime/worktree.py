@@ -174,11 +174,14 @@ class WorktreeManager:
                 if dirty or not plan.continues:
                     # The baseline separates the user's replayed WIP from the
                     # agent's own work, and marks a fresh branch as ours.
-                    base_commit = self._commit_all(
-                        worktree_path,
-                        f"mica: task {task_id} baseline (user snapshot)",
-                        allow_empty=True,
-                    ) or plan.base
+                    base_commit = (
+                        self._commit_all(
+                            worktree_path,
+                            f"mica: task {task_id} baseline (user snapshot)",
+                            allow_empty=True,
+                        )
+                        or plan.base
+                    )
                 else:
                     base_commit = plan.base
                 self._write_branch_record(repo, plan.name, user_state, base_commit)
@@ -263,7 +266,10 @@ class WorktreeManager:
         else:
             args = ["worktree", "add", "-b", plan.name, str(path), plan.base]
         completed = subprocess.run(
-            ["git", "-C", str(repo), *args], check=False, capture_output=True, text=True,
+            ["git", "-C", str(repo), *args],
+            check=False,
+            capture_output=True,
+            text=True,
             timeout=GIT_TIMEOUT,
         )
         if completed.returncode == 0:
@@ -355,7 +361,9 @@ class WorktreeManager:
                 repo = Path(meta["repo"])
                 worktree_path = env_root / WORKTREE_DIR_NAME
                 if worktree_path.exists():
-                    self._git(repo, "worktree", "remove", "--force", str(worktree_path), check=False)
+                    self._git(
+                        repo, "worktree", "remove", "--force", str(worktree_path), check=False
+                    )
                 self._git(repo, "worktree", "prune", check=False)
                 shutil.rmtree(env_root, ignore_errors=True)
                 branch = meta.get("branch") or ""
@@ -498,7 +506,9 @@ class WorktreeManager:
         out = self._git(worktree_path, "diff", "--name-only", "--diff-filter=U", check=False)
         return [line for line in out.splitlines() if line.strip()]
 
-    def _commit_all(self, worktree_path: Path, message: str, allow_empty: bool = False) -> Optional[str]:
+    def _commit_all(
+        self, worktree_path: Path, message: str, allow_empty: bool = False
+    ) -> Optional[str]:
         for name in AGENT_STATE_DIR_NAMES:
             shutil.rmtree(worktree_path / name, ignore_errors=True)
         last_error: Optional[WorktreeError] = None

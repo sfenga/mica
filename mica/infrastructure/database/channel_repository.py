@@ -41,8 +41,9 @@ class PostgresChannelRepository:
 
     def delete_chat_data(self, event_ids: list[str]) -> None:
         with self.database.connection() as connection:
-            connection.execute("DELETE FROM outbox_message WHERE source_event_id=ANY(%s)",
-                               (event_ids,))
+            connection.execute(
+                "DELETE FROM outbox_message WHERE source_event_id=ANY(%s)", (event_ids,)
+            )
 
     def delete_issue_data(self, issue_id: str, event_ids: list[str]) -> None:
         with self.database.connection() as connection:
